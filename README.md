@@ -14,11 +14,11 @@ pub fn main() !void {
     std.debug.print("{}\n", .{A});
 
     const slice: []const []const u64 = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
-    const B = try Tensor(u64).fromOwnedSlice(allocator, slice);
+    var B = try Tensor(u64).fromOwnedSlice(allocator, slice);
     defer B.deinit();
     std.debug.print("{}\n", .{B});
 
-    const C = try A.add(B);
+    const C = try A.add(&B);
     defer C.deinit();
     std.debug.print("{}\n", .{C});
 

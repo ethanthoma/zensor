@@ -17,7 +17,7 @@ pub fn Tensor(comptime T: type) type {
         const Self = @This();
 
         buffer: []u8,
-        shape: []const usize,
+        shape: []usize,
         strides: []usize,
         allocator: Allocator,
 
@@ -63,7 +63,7 @@ pub fn Tensor(comptime T: type) type {
 
         fn determineShape(allocator: Allocator, slice: anytype) ![]usize {
             if (@typeInfo(@TypeOf(slice)) != .Pointer) {
-                const shape = try allocator.alloc(usize, 1);
+                const shape: []usize = try allocator.alloc(usize, 1);
                 shape[0] = 1;
                 return shape;
             }
@@ -82,7 +82,7 @@ pub fn Tensor(comptime T: type) type {
                 }
             }.countDims(slice, 0);
 
-            const shape = try allocator.alloc(usize, dim);
+            const shape: []usize = try allocator.alloc(usize, dim);
 
             struct {
                 fn setShape(_shape: []usize, _slice: anytype, idx: usize) void {
@@ -96,6 +96,27 @@ pub fn Tensor(comptime T: type) type {
             }.setShape(shape, slice, 0);
 
             return shape;
+        }
+
+        pub fn reshape(self: *Self, shape: []const usize) !void {
+            var length: usize = 1;
+            for (shape) |dim| {
+                length *= dim;
+            }
+
+            if (length != self.data().len) {
+                return Error.ShapeMismatch;
+            }
+
+            self.allocator.free(self.shape);
+            self.allocator.free(self.strides);
+
+            const _shape: []usize = try self.allocator.alloc(usize, shape.len);
+            @memcpy(_shape, shape);
+            self.shape = _shape;
+
+            const strides = try determineStrides(self.allocator, shape);
+            self.strides = strides;
         }
 
         // TODO: check that slice type is the same as T
@@ -254,22 +275,36 @@ pub fn Tensor(comptime T: type) type {
             @memset(self.data(), value);
         }
 
-        pub fn add(self: Self, other: Self) (Error || Allocator.Error)!Self {
-            if (self.shape.len != other.shape.len) {
-                return error.ShapeMismatch;
-            }
-            for (self.shape, other.shape) |s, o| {
-                if (s != o) {
-                    return error.ShapeMismatch;
+        pub fn add(self: *Self, other: *Self) (Error || Allocator.Error)!Self {
+            const shape = try broadcastShape(self.allocator, self.shape, other.shape);
+            defer self.allocator.free(shape);
+            errdefer self.allocator.free(shape);
+
+            const broadcastedTensor = struct {
+                pub fn func(tensor: *Self, _shape: []usize) !void {
+                    if (tensor.shape.len != _shape.len) {
+                        try tensor.broadcastToShape(_shape);
+                    } else {
+                        for (tensor.shape, _shape) |s, t| {
+                            if (s != t) {
+                                try tensor.broadcastToShape(_shape);
+                                return;
+                            }
+                        }
+                    }
+                    return;
                 }
-            }
+            }.func;
+
+            try broadcastedTensor(self, shape);
+            try broadcastedTensor(other, shape);
 
             const result = try Self.init(
                 self.allocator,
-                self.shape,
+                shape,
             );
 
-            for (0..self.data().len) |idx| {
+            for (0..result.data().len) |idx| {
                 result.data()[idx] = self.data()[idx] + other.data()[idx];
             }
 
@@ -298,22 +333,34 @@ pub fn Tensor(comptime T: type) type {
             return result[0..max_len];
         }
 
-        fn broadcastToShape(self: Self, targetShape: []const usize) !Self {
-            if (self.len == targetShape.len) {
+        fn broadcastToShape(self: *Self, targetShape: []const usize) !void {
+            if (self.shape.len == targetShape.len) {
                 var same = true;
                 for (self.shape, targetShape) |s, t| {
                     same = same and s == t;
                 }
                 if (same) {
-                    return self;
+                    return;
                 }
             }
 
-            const result = try Self.init(self.allocator, targetShape);
+            const buffer = try determineBuffer(self.allocator, targetShape);
+            const newData = mem.bytesAsSlice(T, buffer);
 
-            for (0..result.data().len) |idx| {
-                result.data()[idx] = self.data()[idx % self.data().len];
+            const shape = try self.allocator.alloc(usize, targetShape.len);
+            @memcpy(shape, targetShape);
+
+            const strides = try determineStrides(self.allocator, targetShape);
+
+            for (0..newData.len) |idx| {
+                newData[idx] = self.data()[idx % self.data().len];
             }
+
+            self.deinit();
+
+            self.buffer = buffer;
+            self.shape = shape;
+            self.strides = strides;
         }
     };
 }
@@ -358,6 +405,22 @@ test "determineShape" {
         const expected = ([_]usize{ 2, 2, 2 })[0..];
 
         try testing.expectEqualSlices(usize, expected, result);
+    }
+}
+
+test "reshape" {
+    const allocator = testing.allocator;
+
+    {
+        var tensor = try Tensor(u64).arange(allocator, 5, 13);
+        defer tensor.deinit();
+
+        try tensor.reshape(([_]usize{ 2, 4 })[0..]);
+
+        for (tensor.data(), 0..) |elem, idx| {
+            const v: u64 = 5 + idx;
+            try testing.expectEqual(v, elem);
+        }
     }
 }
 
@@ -449,7 +512,52 @@ test "broadcastShape" {
 }
 
 test "broadcastToShape" {
-    {}
+    const allocator = testing.allocator;
+
+    {
+        const slice: []const []const u64 = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
+        var tensor = try Tensor(u64).fromOwnedSlice(allocator, slice);
+        defer tensor.deinit();
+
+        var ptr: *Tensor(u64) = &tensor;
+        try ptr.broadcastToShape(([_]usize{ 2, 3, 3 })[0..]);
+
+        try tensor.broadcastToShape(([_]usize{ 2, 3, 3 })[0..]);
+        const expectedShape = ([_]usize{ 2, 3, 3 })[0..];
+
+        try std.testing.expectEqualSlices(usize, expectedShape, tensor.shape);
+
+        const actualData: []const u64 = @alignCast(@ptrCast(tensor.data()));
+        for (actualData, 0..) |elem, idx| {
+            const v: u64 = 3 - (idx % 3);
+            try std.testing.expectEqual(v, elem);
+        }
+    }
+}
+
+test "add" {
+    const allocator = testing.allocator;
+
+    {
+        var tensor1: Tensor(u64) = try Tensor(u64).arange(allocator, 5, 13);
+        defer tensor1.deinit();
+
+        try tensor1.reshape(([_]usize{ 2, 4 })[0..]);
+
+        const shape2 = ([_]usize{ 3, 2, 4 })[0..];
+        var tensor2 = try Tensor(u64).init(allocator, shape2);
+        defer tensor2.deinit();
+
+        tensor2.fill(2);
+
+        const result = try tensor1.add(&tensor2);
+        defer result.deinit();
+
+        for (result.data(), 0..) |elem, idx| {
+            const v: u64 = (idx % 8) + 7;
+            try testing.expectEqual(v, elem);
+        }
+    }
 }
 
 test {
@@ -466,11 +574,11 @@ pub fn main() !void {
     std.debug.print("{}\n", .{A});
 
     const slice: []const []const u64 = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
-    const B = try Tensor(u64).fromOwnedSlice(allocator, slice);
+    var B = try Tensor(u64).fromOwnedSlice(allocator, slice);
     defer B.deinit();
     std.debug.print("{}\n", .{B});
 
-    const C = try A.add(B);
+    const C = try A.add(&B);
     defer C.deinit();
     std.debug.print("{}\n", .{C});
 
