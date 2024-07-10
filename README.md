@@ -85,5 +85,5 @@ Add to your `build.zig`:
         .target = target,
         .optimize = optimize,
     }).module("zensor");
-    exe.root_module.addImport("zensor", zensor));
+    exe.root_module.addImport("zensor", zensor);
 ```
