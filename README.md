@@ -2,8 +2,10 @@
 
 Basic tensor library implemented in zig. Correctness first, speed second.
 
-Example usage:
+## Example Usage:
 ```zig 
+const Tensor = @import("zensor").Tensor;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -28,9 +30,9 @@ pub fn main() !void {
 }
 ```
 
-This gives:
+Results in:
 ```
-❯ zig run main.zig
+❯ zig build run
 Tensor(
         type: u64,
         shape: [2, 3],
@@ -68,4 +70,20 @@ Tensor(
         data:
         [5, 6, 7, 8, 9, 10, 11]
 )
+```
+
+## Install
+
+Fetch the library:
+```bash
+zig fetch --save git+https://github.com/ethanthoma/zensor.git#main
+```
+
+Add to your `build.zig`:
+```zig
+    const zensor = b.dependency("zensor", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zensor");
+    exe.root_module.addImport("zensor", zensor));
 ```

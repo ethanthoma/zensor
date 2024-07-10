@@ -21,28 +21,20 @@ pub fn Tensor(comptime T: type) type {
         strides: []usize,
         allocator: Allocator,
 
-        fn init(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
-            const buffer = try determineBuffer(allocator, shape);
-
-            const _shape = try allocator.alloc(usize, shape.len);
-            @memcpy(_shape, shape);
-
-            const strides = try determineStrides(allocator, shape);
-
+        pub fn init(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
             return Self{
-                .buffer = buffer,
-                .shape = _shape,
-                .strides = strides,
+                .buffer = try determineBuffer(allocator, shape),
+                .shape = try allocator.dupe(usize, shape),
+                .strides = try determineStrides(allocator, shape),
                 .allocator = allocator,
             };
         }
 
         fn determineBuffer(allocator: Allocator, shape: []const usize) ![]u8 {
-            var size: usize = shape[shape.len - 1];
-            var i = shape.len - 1;
-            while (i > 0) {
-                i -= 1;
-                size *= shape[i];
+            var size: usize = 1;
+
+            for (shape) |dim| {
+                size *= dim;
             }
 
             return try allocator.alloc(u8, size * @sizeOf(T) / @sizeOf(u8));
@@ -53,9 +45,8 @@ pub fn Tensor(comptime T: type) type {
 
             strides[shape.len - 1] = 1;
             var i = shape.len - 1;
-            while (i > 0) {
-                i -= 1;
-                strides[i] = shape[i + 1] * strides[i + 1];
+            while (i > 0) : (i -= 1) {
+                strides[i - 1] = shape[i] * strides[i];
             }
 
             return strides;
@@ -111,18 +102,13 @@ pub fn Tensor(comptime T: type) type {
             self.allocator.free(self.shape);
             self.allocator.free(self.strides);
 
-            const _shape: []usize = try self.allocator.alloc(usize, shape.len);
-            @memcpy(_shape, shape);
-            self.shape = _shape;
-
-            const strides = try determineStrides(self.allocator, shape);
-            self.strides = strides;
+            self.shape = try self.allocator.dupe(usize, shape);
+            self.strides = try determineStrides(self.allocator, shape);
         }
 
         // TODO: check that slice type is the same as T
         pub fn fromOwnedSlice(allocator: Allocator, slice: anytype) Allocator.Error!Self {
             const shape = try determineShape(allocator, slice);
-
             const buffer = try determineBuffer(allocator, shape);
             const strides = try determineStrides(allocator, shape);
 
@@ -134,21 +120,16 @@ pub fn Tensor(comptime T: type) type {
             };
 
             struct {
-                pub fn copyData(_slice: anytype, _data: []align(1) T, _strides: []usize, offset: usize, index: usize) void {
-                    if (@typeInfo(@TypeOf(_slice)) != .Pointer) {
-                        unreachable();
-                    }
-
-                    if (_strides.len - 1 == index) {
-                        for (0.._slice.len) |idx| {
-                            if (@TypeOf(_slice[idx]) == T) {
-                                _data[offset + idx] = _slice[idx];
+                pub fn copyData(_slice: anytype, _data: []align(1) T, _strides: []usize, offset: usize, depth: usize) void {
+                    switch (@TypeOf(_slice)) {
+                        []const T => {
+                            @memcpy(_data[offset .. offset + _slice.len], _slice);
+                        },
+                        else => {
+                            for (_slice, 0..) |_innerSlice, idx| {
+                                copyData(_innerSlice, _data, _strides, offset + idx * _strides[depth], depth + 1);
                             }
-                        }
-                    } else {
-                        for (_slice, 0..) |_innerSlice, idx| {
-                            copyData(_innerSlice, _data, _strides, offset + idx * _strides[index], index + 1);
-                        }
+                        },
                     }
                 }
             }.copyData(slice, self.data(), self.strides, 0, 0);
@@ -156,7 +137,7 @@ pub fn Tensor(comptime T: type) type {
             return self;
         }
 
-        fn zeros(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
+        pub fn zeros(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
             const self = try Self.init(allocator, shape);
 
             @memset(self.buffer, 0);
@@ -164,7 +145,7 @@ pub fn Tensor(comptime T: type) type {
             return self;
         }
 
-        fn ones(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
+        pub fn ones(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
             const self = try Self.init(allocator, shape);
 
             @memset(self.data(), 1);
@@ -172,7 +153,7 @@ pub fn Tensor(comptime T: type) type {
             return self;
         }
 
-        fn arange(allocator: Allocator, start: usize, stop: usize) Allocator.Error!Self {
+        pub fn arange(allocator: Allocator, start: usize, stop: usize) Allocator.Error!Self {
             const self = try Self.init(allocator, ([_]usize{stop - start})[0..]);
 
             const convertToT = struct {
@@ -280,32 +261,16 @@ pub fn Tensor(comptime T: type) type {
             defer self.allocator.free(shape);
             errdefer self.allocator.free(shape);
 
-            const broadcastedTensor = struct {
-                pub fn func(tensor: *Self, _shape: []usize) !void {
-                    if (tensor.shape.len != _shape.len) {
-                        try tensor.broadcastToShape(_shape);
-                    } else {
-                        for (tensor.shape, _shape) |s, t| {
-                            if (s != t) {
-                                try tensor.broadcastToShape(_shape);
-                                return;
-                            }
-                        }
-                    }
-                    return;
-                }
-            }.func;
-
-            try broadcastedTensor(self, shape);
-            try broadcastedTensor(other, shape);
+            try self.broadcastToShape(shape);
+            try other.broadcastToShape(shape);
 
             const result = try Self.init(
                 self.allocator,
                 shape,
             );
 
-            for (0..result.data().len) |idx| {
-                result.data()[idx] = self.data()[idx] + other.data()[idx];
+            for (result.data(), self.data(), other.data()) |*r, s, o| {
+                r.* = s + o;
             }
 
             return result;
@@ -347,13 +312,12 @@ pub fn Tensor(comptime T: type) type {
             const buffer = try determineBuffer(self.allocator, targetShape);
             const newData = mem.bytesAsSlice(T, buffer);
 
-            const shape = try self.allocator.alloc(usize, targetShape.len);
-            @memcpy(shape, targetShape);
+            const shape = try self.allocator.dupe(usize, targetShape);
 
             const strides = try determineStrides(self.allocator, targetShape);
 
-            for (0..newData.len) |idx| {
-                newData[idx] = self.data()[idx % self.data().len];
+            for (newData, 0..) |*elem, idx| {
+                elem.* = self.data()[idx % self.data().len];
             }
 
             self.deinit();
@@ -562,27 +526,4 @@ test "add" {
 
 test {
     testing.refAllDecls(@This());
-}
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-
-    var A = try Tensor(u64).init(allocator, ([_]usize{ 2, 3 })[0..]);
-    defer A.deinit();
-    A.fill(4);
-    std.debug.print("{}\n", .{A});
-
-    const slice: []const []const u64 = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
-    var B = try Tensor(u64).fromOwnedSlice(allocator, slice);
-    defer B.deinit();
-    std.debug.print("{}\n", .{B});
-
-    const C = try A.add(&B);
-    defer C.deinit();
-    std.debug.print("{}\n", .{C});
-
-    const D = try Tensor(u32).arange(allocator, 5, 12);
-    defer D.deinit();
-    std.debug.print("{}\n", .{D});
 }
