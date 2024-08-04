@@ -6,9 +6,8 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var A = try Tensor(u64).init(allocator, ([_]usize{ 2, 3 })[0..]);
+    var A = try Tensor(u64).full(allocator, .{ 2, 3 }, 4);
     defer A.deinit();
-    A.fill(4);
     std.debug.print("{}\n", .{A});
 
     const slice: []const []const u64 = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };

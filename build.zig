@@ -4,34 +4,58 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zensorModule = b.addModule("zensor", .{
-        .root_source_file = b.path("src/zensor.zig"),
+    const zensorModule = b.addModule(LIBRARY_NAME, .{
+        .root_source_file = b.path("src/" ++ LIBRARY_NAME ++ ".zig"),
     });
 
-    const exe = b.addExecutable(.{
-        .name = "zensor.zig example",
-        .root_source_file = b.path("example/example.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("zensor", zensorModule);
-    b.installArtifact(exe);
+    addTest(b, target, optimize, zensorModule);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-    const run_step = b.step("run", "Run the example");
-    run_step.dependOn(&run_cmd.step);
-
-    const tests = b.addTest(.{
-        .root_source_file = b.path("src/zensor.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_test = b.addRunArtifact(tests);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_test.step);
+    addExamples(b, target, optimize, zensorModule);
 }
+
+fn addTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lib_mod: *std.Build.Module) void {
+    const tests_step = b.step("test", "Run tests");
+
+    inline for (TEST_NAMES) |TEST_NAME| {
+        const tests = b.addTest(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path(TEST_DIR ++ TEST_NAME ++ ".zig"),
+        });
+        tests.root_module.addImport(LIBRARY_NAME, lib_mod);
+        const test_run = b.addRunArtifact(tests);
+        tests_step.dependOn(&test_run.step);
+    }
+
+    b.default_step.dependOn(tests_step);
+}
+
+fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lib_mod: *std.Build.Module) void {
+    const examples_step = b.step("examples", "Run examples");
+
+    inline for (EXAMPLE_NAMES) |EXAMPLE_NAME| {
+        const example = b.addExecutable(.{
+            .name = EXAMPLE_NAME,
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path(EXAMPLES_DIR ++ EXAMPLE_NAME ++ ".zig"),
+        });
+        example.root_module.addImport(LIBRARY_NAME, lib_mod);
+        const example_run = b.addRunArtifact(example);
+        examples_step.dependOn(&example_run.step);
+    }
+}
+
+const LIBRARY_NAME = "zensor";
+
+const TEST_DIR = "test/";
+
+const TEST_NAMES = &.{
+    "test",
+};
+
+const EXAMPLES_DIR = "examples/";
+
+const EXAMPLE_NAMES = &.{
+    "basic",
+};

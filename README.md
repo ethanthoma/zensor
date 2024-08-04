@@ -10,9 +10,8 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var A = try Tensor(u64).init(allocator, ([_]usize{ 2, 3 })[0..]);
+    var A = try Tensor(u64).full(allocator, .{2, 3}, 4);
     defer A.deinit();
-    A.fill(4);
     std.debug.print("{}\n", .{A});
 
     const slice: []const []const u64 = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
@@ -23,10 +22,6 @@ pub fn main() !void {
     const C = try A.add(&B);
     defer C.deinit();
     std.debug.print("{}\n", .{C});
-
-    const D = try Tensor(u32).arange(allocator, 5, 12);
-    defer D.deinit();
-    std.debug.print("{}\n", .{D});
 }
 ```
 
@@ -63,13 +58,6 @@ Tensor(
                 [7, 6, 5]
         ]
 )
-Tensor(
-        type: u32,
-        shape: [7],
-        length: 7,
-        data:
-        [5, 6, 7, 8, 9, 10, 11]
-)
 ```
 
 ## Install
@@ -86,4 +74,19 @@ Add to your `build.zig`:
         .optimize = optimize,
     }).module("zensor");
     exe.root_module.addImport("zensor", zensor);
+```
+
+## Examples
+
+Examples can be found in `./examples`. You can run these via:
+```bash
+zig build examples
+```
+Assuming you have cloned the source.
+
+## Tests
+
+If you want to run the tests after cloning the source. Simply run:
+```bash
+zig build test
 ```
