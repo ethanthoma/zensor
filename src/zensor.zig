@@ -1,8 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-
-const testing = std.testing;
 const assert = std.debug.assert;
 
 pub const Error = error{
@@ -111,7 +109,7 @@ pub fn Tensor(comptime T: type) type {
             try writer.print(")", .{});
         }
 
-        fn broadcastToShape(self: *Self, targetShape: []const usize) !void {
+        fn broadcastToShape(self: *Self, targetShape: []const usize) Allocator.Error!void {
             if (self.shape.len == targetShape.len) {
                 var same = true;
                 for (self.shape, targetShape) |s, t| {
@@ -123,11 +121,15 @@ pub fn Tensor(comptime T: type) type {
             }
 
             const buffer = try determineBuffer(T, self.allocator, targetShape);
+            errdefer self.allocator.free(buffer);
+
             const newData = mem.bytesAsSlice(T, buffer);
 
             const shape = try self.allocator.dupe(usize, targetShape);
+            errdefer self.allocator.free(shape);
 
             const strides = try determineStrides(self.allocator, targetShape);
+            errdefer self.allocator.free(strides);
 
             for (newData, 0..) |*elem, idx| {
                 elem.* = self.data()[idx % self.data().len];
@@ -231,9 +233,8 @@ pub fn Movement(comptime T: type) type {
     return struct {
         const Self = Tensor(T);
 
-        pub fn reshape(self: *Self, comptime dims: anytype) !void {
-            const comptimeshape = getShape(dims);
-            const shape = comptimeshape[0..];
+        pub fn reshape(self: *Self, comptime dims: anytype) (Error || Allocator.Error)!void {
+            const shape = getShape(dims);
             errdefer self.allocator.free(shape);
 
             var length: usize = 1;
@@ -249,6 +250,7 @@ pub fn Movement(comptime T: type) type {
             self.allocator.free(self.strides);
 
             self.shape = try self.allocator.dupe(usize, shape);
+            // user should defer free self so no need to free shape if strides fail
             self.strides = try determineStrides(self.allocator, shape);
         }
     };
@@ -261,7 +263,6 @@ pub fn Ops(comptime T: type) type {
         inline fn elementWiseOp(self: *Self, other: *Self, comptime op: fn (T, T) T) (Error || Allocator.Error)!Self {
             const shape = try broadcastShape(self.allocator, self.shape, other.shape);
             defer self.allocator.free(shape);
-            errdefer self.allocator.free(shape);
 
             try self.broadcastToShape(shape);
             try other.broadcastToShape(shape);
@@ -309,7 +310,7 @@ pub fn Ops(comptime T: type) type {
     };
 }
 
-fn determineBuffer(comptime T: type, allocator: Allocator, shape: []const usize) ![]u8 {
+fn determineBuffer(comptime T: type, allocator: Allocator, shape: []const usize) Allocator.Error![]u8 {
     var size: usize = 1;
 
     for (shape) |dim| {
@@ -319,7 +320,7 @@ fn determineBuffer(comptime T: type, allocator: Allocator, shape: []const usize)
     return try allocator.alloc(u8, size * @sizeOf(T) / @sizeOf(u8));
 }
 
-fn determineStrides(allocator: Allocator, shape: []const usize) ![]usize {
+fn determineStrides(allocator: Allocator, shape: []const usize) Allocator.Error![]usize {
     var strides = try allocator.alloc(usize, shape.len);
 
     strides[shape.len - 1] = 1;
@@ -332,7 +333,7 @@ fn determineStrides(allocator: Allocator, shape: []const usize) ![]usize {
 }
 
 // follows numpy broadcasting rules
-fn broadcastShape(allocator: Allocator, shape1: []const usize, shape2: []const usize) ![]usize {
+fn broadcastShape(allocator: Allocator, shape1: []const usize, shape2: []const usize) (Error || Allocator.Error)![]usize {
     const max_len = @max(shape1.len, shape2.len);
 
     var result: []usize = try allocator.alloc(usize, max_len);
@@ -387,7 +388,7 @@ fn getShape(dims: anytype) []const usize {
     return array[0..];
 }
 
-fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) ![]usize {
+fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) Allocator.Error![]usize {
     const dim: usize = struct {
         fn countDims(slice: anytype, acc: usize) usize {
             if (@typeInfo(@TypeOf(slice)) == .Pointer) {
@@ -416,8 +417,4 @@ fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) ![]usize 
     }.setShape(shape, dims, 0);
 
     return shape;
-}
-
-test {
-    testing.refAllDecls(@This());
 }
