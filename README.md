@@ -1,5 +1,5 @@
 <h3 align="center">
-    Decision Transformer in Tinygrad
+    Zensor, a zig tensor library
 </h3>
 
 Basic tensor library implemented in zig. Correctness first, speed second.
