@@ -1,6 +1,25 @@
-**Very WIP**
+<h3 align="center">
+    Decision Transformer in Tinygrad
+</h3>
 
 Basic tensor library implemented in zig. Correctness first, speed second.
+
+**Very WIP**
+
+- [x] Basic generic Tensor type for floats and ints
+- [x] Creation functions (ones, zeroes, full)
+- [x] Create fromOwnedSlice
+- [x] Elementwise ops
+- [x] Broadcasting
+- [ ] Matmul
+- [ ] Save/loading (possible numpy data format integration)
+- [ ] Refactor files for easier management
+- [ ] Movement functions (squeeze, stack, permute, expand, etc)
+- [ ] Op functions (max/min, sum, tril)
+- [ ] Casting
+- [ ] Casting
+- [ ] Einsum
+- [ ] Explore lazy ops vs comptime ops graph
 
 ## Example Usage:
 ```zig 
