@@ -4,24 +4,30 @@ Basic tensor library implemented in zig. Correctness first, speed second.
 
 ## Example Usage:
 ```zig 
-const Tensor = @import("zensor").Tensor;
+const std = @import("std");
+
+const T = u32;
+const Tensor = @import("zensor").Tensor(T);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var A = try Tensor(u64).full(allocator, .{2, 3}, 4);
+    var A = try Tensor.full(allocator, .{ 2, 3 }, 4);
     defer A.deinit();
     std.debug.print("{}\n", .{A});
 
-    const slice: []const []const u64 = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
-    var B = try Tensor(u64).fromOwnedSlice(allocator, slice);
+    const slice: []const []const T = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
+    var B = try Tensor.fromOwnedSlice(allocator, slice);
     defer B.deinit();
     std.debug.print("{}\n", .{B});
 
-    const C = try A.add(&B);
+    var C = try A.add(&B);
     defer C.deinit();
     std.debug.print("{}\n", .{C});
+
+    const D = try C.add(3);
+    std.debug.print("{}\n", .{D});
 }
 ```
 
@@ -29,7 +35,7 @@ Results in:
 ```
 ❯ zig build run
 Tensor(
-        type: u64,
+        type: u32,
         shape: [2, 3],
         length: 6,
         data:
@@ -39,7 +45,7 @@ Tensor(
         ]
 )
 Tensor(
-        type: u64,
+        type: u32,
         shape: [2, 3],
         length: 6,
         data:
@@ -49,13 +55,23 @@ Tensor(
         ]
 )
 Tensor(
-        type: u64,
+        type: u32,
         shape: [2, 3],
         length: 6,
         data:
         [
                 [7, 6, 5],
                 [7, 6, 5]
+        ]
+)
+Tensor(
+        type: u32,
+        shape: [2, 3],
+        length: 6,
+        data:
+        [
+                [10, 9, 8],
+                [10, 9, 8]
         ]
 )
 ```

@@ -29,6 +29,23 @@ test "empty" {
     }
 }
 
+test "clone" {
+    const allocator = testing.allocator;
+
+    {
+        const T = u64;
+        var tensor1 = try Tensor(T).arange(allocator, 5, 13);
+        defer tensor1.deinit();
+
+        const tensor2 = try tensor1.clone();
+        defer tensor2.deinit();
+
+        for (tensor1.data(), tensor2.data()) |elem1, elem2| {
+            try testing.expectEqual(elem1, elem2);
+        }
+    }
+}
+
 test "reshape" {
     const allocator = testing.allocator;
 
@@ -265,6 +282,21 @@ test "add" {
         const expected = Error.CannotBroadcast;
 
         try testing.expectError(expected, result);
+    }
+    {
+        const T = u64;
+        var self: Tensor(T) = try Tensor(u64).arange(allocator, 5, 13);
+        defer self.deinit();
+
+        const other: T = 2;
+
+        const result = try self.add(other);
+        defer result.deinit();
+
+        for (result.data(), 0..) |elem, idx| {
+            const v: T = idx + 5 + other;
+            try testing.expectEqual(v, elem);
+        }
     }
 }
 

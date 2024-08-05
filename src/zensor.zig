@@ -24,7 +24,7 @@ pub fn Tensor(comptime T: type) type {
         pub usingnamespace Movement(T);
         pub usingnamespace Ops(T);
 
-        fn init(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
+        pub fn init(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
             return Self{
                 .buffer = try determineBuffer(T, allocator, shape),
                 .shape = try allocator.dupe(usize, shape),
@@ -37,6 +37,23 @@ pub fn Tensor(comptime T: type) type {
             self.allocator.free(self.buffer);
             self.allocator.free(self.strides);
             self.allocator.free(self.shape);
+        }
+
+        pub fn clone(self: *Self) (Error || Allocator.Error)!Self {
+            const buffer = try self.allocator.dupe(u8, self.buffer);
+            errdefer self.allocator.free(buffer);
+
+            const shape = try self.allocator.dupe(usize, self.shape);
+            errdefer self.allocator.free(shape);
+
+            const strides = try self.allocator.dupe(usize, self.strides);
+
+            return Self{
+                .buffer = buffer,
+                .shape = shape,
+                .strides = strides,
+                .allocator = self.allocator,
+            };
         }
 
         pub fn data(self: Self) []align(1) T {
@@ -141,6 +158,23 @@ pub fn Tensor(comptime T: type) type {
             self.shape = shape;
             self.strides = strides;
         }
+
+        fn broadcast(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
+            var other_as_tensor: Self = if (@TypeOf(other) == *Self) try other.clone() else switch (@typeInfo(@TypeOf(other))) {
+                .Float, .Int, .ComptimeInt => try Self.fullLike(self.allocator, self, other),
+                .Pointer => try Self.fromOwnedSlice(self.allocator, other),
+                else => return Error.WrongType,
+            };
+            errdefer other_as_tensor.deinit();
+
+            const out_shape = try broadcastShape(self.allocator, self.shape, other_as_tensor.shape);
+            defer self.allocator.free(out_shape);
+
+            try self.broadcastToShape(out_shape);
+            try other_as_tensor.broadcastToShape(out_shape);
+
+            return other_as_tensor;
+        }
     };
 }
 
@@ -226,6 +260,18 @@ pub fn Creation(comptime T: type) type {
 
             return self;
         }
+
+        pub fn fromScaler(self: *Self, value: anytype) (Error || Allocator.Error)!Self {
+            const other = try Self.fullLike(self.allocator, self, value);
+            other.data()[0] = value;
+            return other;
+        }
+
+        pub fn fullLike(allocator: Allocator, tensor: *Self, value: T) Allocator.Error!Self {
+            const self = try Self.init(allocator, tensor.shape);
+            @memset(self.data(), value);
+            return self;
+        }
     };
 }
 
@@ -233,6 +279,7 @@ pub fn Movement(comptime T: type) type {
     return struct {
         const Self = Tensor(T);
 
+        // TODO: add support for -1
         pub fn reshape(self: *Self, comptime dims: anytype) (Error || Allocator.Error)!void {
             const shape = getShape(dims);
             errdefer self.allocator.free(shape);
@@ -260,23 +307,20 @@ pub fn Ops(comptime T: type) type {
     return struct {
         const Self = Tensor(T);
 
-        inline fn elementWiseOp(self: *Self, other: *Self, comptime op: fn (T, T) T) (Error || Allocator.Error)!Self {
-            const shape = try broadcastShape(self.allocator, self.shape, other.shape);
-            defer self.allocator.free(shape);
+        inline fn elementWiseOp(self: *Self, other: anytype, comptime op: fn (T, T) T) (Error || Allocator.Error)!Self {
+            const broadcasted_other = try self.broadcast(other);
+            defer broadcasted_other.deinit();
 
-            try self.broadcastToShape(shape);
-            try other.broadcastToShape(shape);
+            const result = try Self.init(self.allocator, broadcasted_other.shape);
 
-            const result = try Self.init(self.allocator, shape);
-
-            for (result.data(), self.data(), other.data()) |*r, s, o| {
+            for (result.data(), self.data(), broadcasted_other.data()) |*r, s, o| {
                 r.* = op(s, o);
             }
 
             return result;
         }
 
-        pub fn add(self: *Self, other: *Self) (Error || Allocator.Error)!Self {
+        pub fn add(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
             return self.elementWiseOp(other, struct {
                 fn op(a: T, b: T) T {
                     return a + b;
@@ -284,7 +328,7 @@ pub fn Ops(comptime T: type) type {
             }.op);
         }
 
-        pub fn subtract(self: *Self, other: *Self) (Error || Allocator.Error)!Self {
+        pub fn subtract(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
             return self.elementWiseOp(other, struct {
                 fn op(a: T, b: T) T {
                     return a - b;
@@ -292,7 +336,7 @@ pub fn Ops(comptime T: type) type {
             }.op);
         }
 
-        pub fn multiply(self: *Self, other: *Self) (Error || Allocator.Error)!Self {
+        pub fn multiply(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
             return self.elementWiseOp(other, struct {
                 fn op(a: T, b: T) T {
                     return a * b;
@@ -300,7 +344,7 @@ pub fn Ops(comptime T: type) type {
             }.op);
         }
 
-        pub fn divide(self: *Self, other: *Self) (Error || Allocator.Error)!Self {
+        pub fn divide(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
             return self.elementWiseOp(other, struct {
                 fn op(a: T, b: T) T {
                     return a / b;
@@ -360,6 +404,10 @@ fn shapeFromStruct(comptime dims: anytype) [dims.len]usize {
 
     var shape: [dims.len]usize = undefined;
     for (dims, 0..) |dim, i| {
+        if (dim < 0) {
+            @compileError("Dimensions must be positive");
+        }
+
         shape[i] = switch (@TypeOf(dim)) {
             comptime_int => dim,
             usize => dim,
@@ -372,6 +420,10 @@ fn shapeFromStruct(comptime dims: anytype) [dims.len]usize {
 fn shapeFromInt(dim: anytype) [1]usize {
     if (@typeInfo(@TypeOf(dim)) != .Int and @typeInfo(@TypeOf(dim)) != .ComptimeInt) {
         @compileError("Dimensions must be an int");
+    }
+
+    if (dim < 0) {
+        @compileError("Dimensions must be positive");
     }
 
     return [_]usize{dim};
@@ -399,6 +451,8 @@ fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) Allocator
                 }
             } else if (@TypeOf(slice) == T) {
                 return acc;
+            } else {
+                @compileError("Unsupported type");
             }
         }
     }.countDims(dims, 0);
