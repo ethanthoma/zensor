@@ -9,6 +9,12 @@ pub const Error = error{
     WrongType,
 };
 
+pub var prng = std.Random.DefaultPrng.init(20240807);
+
+pub fn manualSeed(seed: u64) void {
+    prng = std.Random.DefaultPrng.init(seed);
+}
+
 pub fn Tensor(comptime T: type) type {
     assert(@typeInfo(T) == .Float or @typeInfo(T) == .Int);
 
@@ -56,8 +62,12 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
-        pub fn data(self: Self) []align(1) T {
-            return mem.bytesAsSlice(T, self.buffer);
+        pub fn data(self: Self) []T {
+            return @alignCast(mem.bytesAsSlice(T, self.buffer));
+        }
+
+        pub fn at(self: Self, index: usize) T {
+            return self.data()[index];
         }
 
         pub fn format(
@@ -272,6 +282,33 @@ pub fn Creation(comptime T: type) type {
             @memset(self.data(), value);
             return self;
         }
+
+        pub fn rand(allocator: Allocator, dims: anytype) Allocator.Error!Self {
+            // Only support f32, f64 and all int
+            const shape = getShape(dims);
+            const self = try Self.init(allocator, shape);
+            for (self.data()) |*elem| {
+                elem.* = switch (@typeInfo(T)) {
+                    .Float => prng.random().float(T),
+                    .Int => prng.random().int(T),
+                    else => unreachable,
+                };
+            }
+            return self;
+        }
+
+        pub fn randInt(allocator: Allocator, dims: anytype, low: T, high: T) Allocator.Error!Self {
+            if (@typeInfo(T) != .Int) {
+                return Error.WrongType;
+            }
+
+            const shape = getShape(dims);
+            const self = try Self.init(allocator, shape);
+            for (self.data()) |*elem| {
+                elem.* = prng.random().intRangeLessThan(T, low, high);
+            }
+            return self;
+        }
     };
 }
 
@@ -361,25 +398,121 @@ pub fn Ops(comptime T: type) type {
             }
 
             const m = self.shape[0];
-            const n = other.shape[1];
-            const k = self.shape[1];
+            const n = other.shape[0];
 
-            const result_shape = [_]usize{ m, n };
-            var result = try Self.init(self.allocator, &result_shape);
+            var result = try Self.zeros(self.allocator, .{ m, n });
             errdefer result.deinit();
 
-            const a = self.data();
-            const b = other.data();
-            const c = result.data();
+            result.matmuladd(self, other);
 
-            for (0..m) |i| {
-                for (0..n) |j| {
-                    var sum: T = 0;
-                    for (0..k) |l| {
-                        sum += a[i * k + l] * b[l * n + j];
+            return result;
+        }
+
+        pub fn matmuladd(c: *Self, a: *Self, b: *Self) (Error || Allocator.Error)!*Self {
+            if (a.shape.len != 2 or b.shape.len != 2 or c.shape.len != 2) {
+                return Error.ShapeMismatch;
+            }
+
+            const m = a.shape[0];
+            const k = a.shape[1];
+            const n = b.shape[1];
+
+            if (b.shape[0] != k or c.shape[0] != m or c.shape[1] != n) {
+                return Error.ShapeMismatch;
+            }
+
+            const a_data = a.data();
+            const b_data = b.data();
+            var c_data = c.data();
+
+            // Define block sizes
+            // These are arbitrary values that seem to work well
+            const M_BLOCK = 256;
+            const N_BLOCK = 128;
+            const K_BLOCK = 1024;
+
+            var a_local: [M_BLOCK * K_BLOCK]T align(64) = undefined;
+            var b_local: [K_BLOCK * N_BLOCK]T align(64) = undefined;
+            var c_local: [M_BLOCK * N_BLOCK]T align(64) = undefined;
+
+            // SIMD vector size
+            const VECTOR_SIZE = 16;
+            const Vec = @Vector(VECTOR_SIZE, T);
+
+            var i: u32 = 0;
+            while (i < m) : (i += M_BLOCK) {
+                const m_end = @min(i + M_BLOCK, m);
+                var j: u32 = 0;
+                while (j < n) : (j += N_BLOCK) {
+                    const n_end = @min(j + N_BLOCK, n);
+
+                    // Initialize c_local
+                    for (0..m_end - i) |ii| {
+                        @memcpy(c_local[ii * N_BLOCK ..][0 .. n_end - j], c_data[(i + ii) * n + j ..][0 .. n_end - j]);
                     }
-                    c[i * n + j] = sum;
+
+                    @memset(&a_local, 0);
+                    @memset(&b_local, 0);
+
+                    var p: u32 = 0;
+                    while (p < k) : (p += K_BLOCK) {
+                        const k_end = @min(p + K_BLOCK, k);
+
+                        // Load A block into a_local
+                        for (i..m_end) |ii| {
+                            @memcpy(a_local[(ii - i) * K_BLOCK ..][0 .. k_end - p], a_data[ii * k + p ..][0 .. k_end - p]);
+                        }
+
+                        // Load B block into b_local (transposed)
+                        for (p..k_end) |pp| {
+                            for (j..n_end) |jj| {
+                                b_local[(jj - j) * K_BLOCK + (pp - p)] = b_data[pp * n + jj];
+                            }
+                        }
+
+                        // Compute using local buffers
+                        for (0..m_end - i) |ii| {
+                            for (0..n_end - j) |jj| {
+                                var sum: Vec = @splat(0);
+                                var kk: usize = 0;
+
+                                while (kk + VECTOR_SIZE <= k_end - p) : (kk += VECTOR_SIZE) {
+                                    const block_a: Vec = a_local[ii * K_BLOCK + kk ..][0..VECTOR_SIZE].*;
+                                    const block_b: Vec = b_local[jj * K_BLOCK + kk ..][0..VECTOR_SIZE].*;
+
+                                    sum += block_a * block_b;
+                                }
+
+                                var tot = @reduce(.Add, sum);
+
+                                for (kk..k_end - p) |kkk| {
+                                    tot += a_local[ii * K_BLOCK + kkk] * b_local[jj * K_BLOCK + kkk];
+                                }
+
+                                c_local[ii * N_BLOCK + jj] += tot;
+                            }
+                        }
+                    }
+
+                    // Write c_local back to c_data
+                    for (0..m_end - i) |ii| {
+                        @memcpy(c_data[(i + ii) * n + j ..][0 .. n_end - j], c_local[ii * N_BLOCK ..][0 .. n_end - j]);
+                    }
                 }
+            }
+            return c;
+        }
+
+        pub fn cast(self: *Self, comptime NewT: type) (Error || Allocator.Error)!Tensor(NewT) {
+            const result = try Tensor(NewT).init(self.allocator, self.shape);
+            errdefer result.deinit();
+
+            for (self.data(), result.data()) |src, *dst| {
+                dst.* = switch (@typeInfo(NewT)) {
+                    .Float => @floatCast(src),
+                    .Int => @intCast(src),
+                    else => @compileError("Unsupported type for casting"),
+                };
             }
 
             return result;

@@ -11,8 +11,8 @@ Basic tensor library implemented in zig. Correctness first, speed second.
 - [x] Create fromOwnedSlice
 - [x] Elementwise ops
 - [x] Broadcasting
-- [x] Matmul
-- [x] Matmul w/broadcasting
+- [x] Matmul only for rank 2 tensors
+- [ ] Matmul w/broadcasting
 - [ ] Refactor files for easier management
 - [ ] Save/loading (possible numpy data format integration)
 - [ ] Movement functions (squeeze, stack, permute, expand, etc)
@@ -126,3 +126,27 @@ If you want to run the tests after cloning the source. Simply run:
 ```bash
 zig build test
 ```
+
+## Performance
+
+This is WIP library so perf sucks as that is not the target atm.
+
+However, I did decide to try a somewhat optimized matmul. You can run the example
+via `zig build benchmark -Doptimize=ReleaseFast`. It will yield:
+```
+Running benchmark:
+        Tensor Type: i32
+        Tensor matmul: two 512x512 Tensors
+        Number of Trials: 1000
+Validating...
+Starting trials...
+Progress: 1000/1000 (100.0%)
+Total time: 10.094 s for 1000 trials.
+Performance: 26.595 GFLOPS/s
+```
+
+Which is the performance I get on my AMD Ryzen 7 5700G.
+
+The implementation is single core and uses random block sizes but does utilize 
+SIMD. GFLOPS is probably super incorrect as I just take the naive 2 * SIZE^3 approach. 
+Good enough for the shot-in-the-dark optimization.
