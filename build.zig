@@ -31,9 +31,8 @@ fn addTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
 }
 
 fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lib_mod: *std.Build.Module) void {
-    const examples_step = b.step("examples", "Run examples");
-
     inline for (EXAMPLE_NAMES) |EXAMPLE_NAME| {
+        const example_step = b.step(EXAMPLE_NAME, "Run " ++ EXAMPLE_NAME ++ " example");
         const example = b.addExecutable(.{
             .name = EXAMPLE_NAME,
             .target = target,
@@ -42,7 +41,7 @@ fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         });
         example.root_module.addImport(LIBRARY_NAME, lib_mod);
         const example_run = b.addRunArtifact(example);
-        examples_step.dependOn(&example_run.step);
+        example_step.dependOn(&example_run.step);
     }
 }
 
@@ -58,4 +57,5 @@ const EXAMPLES_DIR = "examples/";
 
 const EXAMPLE_NAMES = &.{
     "basic",
+    "benchmark",
 };

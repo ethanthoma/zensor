@@ -328,7 +328,7 @@ pub fn Ops(comptime T: type) type {
             }.op);
         }
 
-        pub fn subtract(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
+        pub fn sub(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
             return self.elementWiseOp(other, struct {
                 fn op(a: T, b: T) T {
                     return a - b;
@@ -336,7 +336,7 @@ pub fn Ops(comptime T: type) type {
             }.op);
         }
 
-        pub fn multiply(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
+        pub fn mul(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
             return self.elementWiseOp(other, struct {
                 fn op(a: T, b: T) T {
                     return a * b;
@@ -344,12 +344,45 @@ pub fn Ops(comptime T: type) type {
             }.op);
         }
 
-        pub fn divide(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
+        pub fn div(self: *Self, other: anytype) (Error || Allocator.Error)!Self {
             return self.elementWiseOp(other, struct {
                 fn op(a: T, b: T) T {
                     return a / b;
                 }
             }.op);
+        }
+
+        pub fn matmul(self: *Self, other: *Self) (Error || Allocator.Error)!Self {
+            if (self.shape.len != 2 or other.shape.len != 2) {
+                return Error.ShapeMismatch;
+            }
+            if (self.shape[1] != other.shape[0]) {
+                return Error.ShapeMismatch;
+            }
+
+            const m = self.shape[0];
+            const n = other.shape[1];
+            const k = self.shape[1];
+
+            const result_shape = [_]usize{ m, n };
+            var result = try Self.init(self.allocator, &result_shape);
+            errdefer result.deinit();
+
+            const a = self.data();
+            const b = other.data();
+            const c = result.data();
+
+            for (0..m) |i| {
+                for (0..n) |j| {
+                    var sum: T = 0;
+                    for (0..k) |l| {
+                        sum += a[i * k + l] * b[l * n + j];
+                    }
+                    c[i * n + j] = sum;
+                }
+            }
+
+            return result;
         }
     };
 }

@@ -11,9 +11,10 @@ Basic tensor library implemented in zig. Correctness first, speed second.
 - [x] Create fromOwnedSlice
 - [x] Elementwise ops
 - [x] Broadcasting
-- [ ] Matmul
-- [ ] Save/loading (possible numpy data format integration)
+- [x] Matmul
+- [x] Matmul w/broadcasting
 - [ ] Refactor files for easier management
+- [ ] Save/loading (possible numpy data format integration)
 - [ ] Movement functions (squeeze, stack, permute, expand, etc)
 - [ ] Op functions (max/min, sum, tril)
 - [ ] Casting
@@ -115,7 +116,7 @@ Add to your `build.zig`:
 
 Examples can be found in `./examples`. You can run these via:
 ```bash
-zig build examples
+zig build NAME_OF_EXAMPLE
 ```
 Assuming you have cloned the source.
 
