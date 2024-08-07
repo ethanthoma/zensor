@@ -24,7 +24,6 @@ fn trial(allocator: Allocator) !void {
     defer B.deinit();
 
     var totalTime: u64 = 0;
-    const progressInterval = @divFloor(TRIALS, 10);
     for (0..TRIALS) |i| {
         const step = struct {
             inline fn step(_A: *const Tensor, _B: *const Tensor) !u64 {
@@ -38,10 +37,8 @@ fn trial(allocator: Allocator) !void {
         }.step;
         totalTime += try step(&A, &B);
 
-        if (@mod((i + 1), progressInterval) == 0 or i == TRIALS - 1) {
-            const progress = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(TRIALS)) * 100;
-            print("\rProgress: {}/{} ({d:.1}%)    ", .{ i + 1, TRIALS, progress });
-        }
+        const progress = @as(f32, @floatFromInt(i + 1)) / @as(f32, @floatFromInt(TRIALS)) * 100;
+        print("\rProgress: {}/{} ({d:.1}%)    ", .{ i + 1, TRIALS, progress });
     }
 
     const timeAsString = try prettyPrintTime(allocator, totalTime);
