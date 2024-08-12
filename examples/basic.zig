@@ -1,7 +1,8 @@
 const std = @import("std");
 
-const T = i32;
-const Tensor = @import("zensor").Tensor(T);
+const zensor = @import("zensor");
+const dtype = zensor.dtypes.float32;
+const Tensor = @import("zensor").Tensor(dtype);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -11,7 +12,7 @@ pub fn main() !void {
     defer A.deinit();
     std.debug.print("{}\n", .{A});
 
-    const slice: []const []const T = &.{
+    const slice: []const []const f32 = &.{
         &.{ -3, -2, -1 },
     };
     var B = try Tensor.fromOwnedSlice(allocator, slice);

@@ -5,8 +5,11 @@ const debug = std.debug;
 const assert = debug.assert;
 const print = debug.print;
 
-const T = i32;
-const Tensor = @import("zensor").Tensor(T);
+const zensor = @import("zensor");
+const dtypes = zensor.dtypes;
+const dtype = dtypes.float32;
+const T = dtype.kind;
+const Tensor = @import("zensor").Tensor;
 
 const TRIALS = 1000;
 const SIZE = 512;
@@ -24,8 +27,8 @@ fn trial(allocator: Allocator) !void {
     print("\tNumber of Trials: {}\n", .{TRIALS});
 
     var A = switch (@typeInfo(T)) {
-        .Float => try Tensor.rand(allocator, .{ SIZE, SIZE }),
-        .Int => try Tensor.randInt(allocator, .{ SIZE, SIZE }, 0, 10),
+        .Float => try Tensor.rand(allocator, .{ SIZE, SIZE }, dtype),
+        .Int => try Tensor.randInt(allocator, .{ SIZE, SIZE }, 0, 10, dtype),
         else => unreachable,
     };
     defer A.deinit();

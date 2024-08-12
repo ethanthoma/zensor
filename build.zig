@@ -58,4 +58,5 @@ const EXAMPLES_DIR = "examples/";
 const EXAMPLE_NAMES = &.{
     "basic",
     "benchmark",
+    "bfloat16",
 };
