@@ -9,6 +9,8 @@ pub const Error = error{
     WrongType,
 };
 
+pub usingnamespace @import("graph.zig");
+
 pub var prng = std.Random.DefaultPrng.init(20240807);
 
 pub fn manualSeed(seed: u64) void {
@@ -21,18 +23,18 @@ pub fn Tensor(comptime dtype: dtypes.DType) type {
         const Self = @This();
 
         buffer: []u8,
-        shape: []usize,
-        strides: []usize,
+        shape: []u64,
+        strides: []u64,
         allocator: Allocator,
 
         pub usingnamespace Creation(dtype);
         pub usingnamespace Movement(dtype);
         pub usingnamespace Ops(dtype);
 
-        pub fn init(allocator: Allocator, shape: []const usize) Allocator.Error!Self {
+        pub fn init(allocator: Allocator, shape: []const u64) Allocator.Error!Self {
             return Self{
                 .buffer = try determineBuffer(T, allocator, shape),
-                .shape = try allocator.dupe(usize, shape),
+                .shape = try allocator.dupe(u64, shape),
                 .strides = try determineStrides(allocator, shape),
                 .allocator = allocator,
             };
@@ -48,10 +50,10 @@ pub fn Tensor(comptime dtype: dtypes.DType) type {
             const buffer = try self.allocator.dupe(u8, self.buffer);
             errdefer self.allocator.free(buffer);
 
-            const shape = try self.allocator.dupe(usize, self.shape);
+            const shape = try self.allocator.dupe(u64, self.shape);
             errdefer self.allocator.free(shape);
 
-            const strides = try self.allocator.dupe(usize, self.strides);
+            const strides = try self.allocator.dupe(u64, self.strides);
 
             return Self{
                 .buffer = buffer,
@@ -65,7 +67,7 @@ pub fn Tensor(comptime dtype: dtypes.DType) type {
             return @alignCast(mem.bytesAsSlice(T, self.buffer));
         }
 
-        pub fn at(self: Self, index: usize) T {
+        pub fn at(self: Self, index: u64) T {
             return self.data()[index];
         }
 
@@ -79,7 +81,7 @@ pub fn Tensor(comptime dtype: dtypes.DType) type {
             _ = fmt;
 
             const formatData = struct {
-                fn print(wrt: anytype, strides: @TypeOf(self.strides), shape: @TypeOf(self.shape), d: []align(1) T, currentShapeIndex: usize, offset: usize) !void {
+                fn print(wrt: anytype, strides: @TypeOf(self.strides), shape: @TypeOf(self.shape), d: []T, currentShapeIndex: u64, offset: u64) !void {
                     for (0..currentShapeIndex + 1) |_| {
                         try wrt.print("\t", .{});
                     }
@@ -135,7 +137,7 @@ pub fn Tensor(comptime dtype: dtypes.DType) type {
             try writer.print(")", .{});
         }
 
-        fn broadcastToShape(self: *Self, targetShape: []const usize) Allocator.Error!void {
+        fn broadcastToShape(self: *Self, targetShape: []const u64) Allocator.Error!void {
             if (self.shape.len == targetShape.len) {
                 var same = true;
                 for (self.shape, targetShape) |s, t| {
@@ -151,7 +153,7 @@ pub fn Tensor(comptime dtype: dtypes.DType) type {
 
             const newData = mem.bytesAsSlice(T, buffer);
 
-            const shape = try self.allocator.dupe(usize, targetShape);
+            const shape = try self.allocator.dupe(u64, targetShape);
             errdefer self.allocator.free(shape);
 
             const strides = try determineStrides(self.allocator, targetShape);
@@ -191,17 +193,17 @@ pub fn Creation(comptime dtype: dtypes.DType) type {
     return struct {
         const Self = Tensor(dtype);
 
-        pub fn empty(allocator: Allocator, dims: anytype) Allocator.Error!Self {
+        pub fn empty(allocator: Allocator, dims: anytype) (Error || Allocator.Error)!Self {
             const shape = getShape(dims);
             const self = try Self.init(allocator, shape);
             return self;
         }
 
-        pub fn zeros(allocator: Allocator, dims: anytype) Allocator.Error!Self {
+        pub fn zeros(allocator: Allocator, dims: anytype) (Error || Allocator.Error)!Self {
             return try Self.full(allocator, dims, 0);
         }
 
-        pub fn ones(allocator: Allocator, dims: anytype) Allocator.Error!Self {
+        pub fn ones(allocator: Allocator, dims: anytype) (Error || Allocator.Error)!Self {
             return try Self.full(allocator, dims, 1);
         }
 
@@ -230,16 +232,17 @@ pub fn Creation(comptime dtype: dtypes.DType) type {
             return self;
         }
 
-        pub fn arange(allocator: Allocator, start: usize, stop: usize) Allocator.Error!Self {
+        pub fn arange(allocator: Allocator, start: u64, stop: u64) Allocator.Error!Self {
             const shape = getShape(stop - start);
             const self = try Self.init(allocator, shape);
 
             const convertToT = struct {
-                pub fn func(from: usize) dtype.kind {
+                pub fn func(from: u64) dtype.kind {
                     return switch (@typeInfo(dtype.kind)) {
                         .Float => @floatFromInt(from),
                         .Int => @intCast(from),
-                        .BFloat16 => dtypes.BFloat16.fromF32(from),
+                        // TODO: don't assume the struct is always BFloat16
+                        .Struct => dtypes.BFloat16.fromF32(from),
                         else => unreachable,
                     };
                 }
@@ -273,7 +276,7 @@ pub fn Creation(comptime dtype: dtypes.DType) type {
             };
 
             struct {
-                pub fn copyData(_slice: anytype, _data: []dtype.kind, _strides: []usize, offset: usize, depth: usize) void {
+                pub fn copyData(_slice: anytype, _data: []dtype.kind, _strides: []u64, offset: u64, depth: u64) void {
                     switch (@TypeOf(_slice)) {
                         []const dtype.kind => {
                             @memcpy(_data[offset .. offset + _slice.len], _slice);
@@ -346,7 +349,7 @@ pub fn Movement(comptime dtype: dtypes.DType) type {
             const shape = getShape(dims);
             errdefer self.allocator.free(shape);
 
-            var length: usize = 1;
+            var length: u64 = 1;
             for (shape) |dim| {
                 length *= dim;
             }
@@ -358,7 +361,7 @@ pub fn Movement(comptime dtype: dtypes.DType) type {
             self.allocator.free(self.shape);
             self.allocator.free(self.strides);
 
-            self.shape = try self.allocator.dupe(usize, shape);
+            self.shape = try self.allocator.dupe(u64, shape);
             // user should defer free self so no need to free shape if strides fail
             self.strides = try determineStrides(self.allocator, shape);
         }
@@ -434,7 +437,19 @@ pub fn Ops(comptime dtype: dtypes.DType) type {
             return result;
         }
 
+        // Define block sizes
+        // These are arbitrary values that seem to work well
+        const dtypeSize = @sizeOf(dtype.kind);
+        const M_BLOCK = 2048 / dtypeSize;
+        const N_BLOCK = 2048 / dtypeSize;
+        const K_BLOCK = 2048 / dtypeSize;
+
+        threadlocal var a_local: [M_BLOCK * K_BLOCK]T align(@alignOf(T)) = undefined;
+        threadlocal var b_local: [K_BLOCK * N_BLOCK]T align(@alignOf(T)) = undefined;
+        threadlocal var c_local: [M_BLOCK * N_BLOCK]T align(@alignOf(T)) = undefined;
+
         pub fn matmuladd(c: *Self, a: *Self, b: *Self) (Error || Allocator.Error)!*Self {
+            @setFloatMode(.optimized);
             if (a.shape.len != 2 or b.shape.len != 2 or c.shape.len != 2) {
                 return Error.ShapeMismatch;
             }
@@ -451,19 +466,8 @@ pub fn Ops(comptime dtype: dtypes.DType) type {
             const b_data = b.data();
             var c_data = c.data();
 
-            // Define block sizes
-            // These are arbitrary values that seem to work well
-            const dtypeSize = @sizeOf(dtype.kind);
-            const M_BLOCK = 1024 / dtypeSize;
-            const N_BLOCK = 512 / dtypeSize;
-            const K_BLOCK = 4096 / dtypeSize;
-
-            var a_local: [M_BLOCK * K_BLOCK]T align(64) = undefined;
-            var b_local: [K_BLOCK * N_BLOCK]T align(64) = undefined;
-            var c_local: [M_BLOCK * N_BLOCK]T align(64) = undefined;
-
             // SIMD vector size
-            const VECTOR_SIZE = 16;
+            const VECTOR_SIZE = 64 / dtypeSize;
             const Vec = @Vector(VECTOR_SIZE, T);
 
             var i: u32 = 0;
@@ -501,7 +505,7 @@ pub fn Ops(comptime dtype: dtypes.DType) type {
                         for (0..m_end - i) |ii| {
                             for (0..n_end - j) |jj| {
                                 var sum: Vec = @splat(0);
-                                var kk: usize = 0;
+                                var kk: u64 = 0;
 
                                 while (kk + VECTOR_SIZE <= k_end - p) : (kk += VECTOR_SIZE) {
                                     const block_a: Vec = a_local[ii * K_BLOCK + kk ..][0..VECTOR_SIZE].*;
@@ -581,7 +585,7 @@ pub const dtypes = struct {
             };
         }
 
-        pub fn countBits(self: DType, value: anytype) usize {
+        pub fn countBits(self: DType, value: anytype) u64 {
             return switch (@typeInfo(@TypeOf(value))) {
                 .Int => @typeInfo(@TypeOf(value)).Int.bits,
                 .Float => @typeInfo(@TypeOf(value)).Float.bits,
@@ -594,11 +598,11 @@ pub const dtypes = struct {
             };
         }
 
-        inline fn countComptimeIntBits(comptime value: anytype) usize {
+        inline fn countComptimeIntBits(comptime value: anytype) u64 {
             // signed
             if (value < 0) {} else {
-                comptime var count: usize = 0;
-                comptime var val: usize = value;
+                comptime var count: u64 = 0;
+                comptime var val: u64 = value;
                 inline while (val > 0) : (count += 1) {
                     val = val >> 1;
                 }
@@ -606,7 +610,7 @@ pub const dtypes = struct {
             }
         }
 
-        pub fn bytesFromValue(dtype: DType, bytes: *const []u8, bitCount: usize, value: dtype.kind) void {
+        pub fn bytesFromValue(dtype: DType, bytes: *const []u8, bitCount: u64, value: dtype.kind) void {
             switch (@typeInfo(@TypeOf(value))) {
                 .Int, .ComptimeInt => bytesFromInt(dtype, bytes, bitCount, value),
                 .Float => bytesFromFloat(dtype, bytes, bitCount, value),
@@ -623,15 +627,15 @@ pub const dtypes = struct {
             }
         }
 
-        fn bytesFromFloat(dtype: DType, bytes: *const []u8, bitCount: usize, value: dtype.kind) void {
+        fn bytesFromFloat(dtype: DType, bytes: *const []u8, bitCount: u64, value: dtype.kind) void {
             _ = bitCount;
 
             const bits = std.mem.toBytes(value);
             @memcpy(bytes.*, bits[0..]);
         }
 
-        fn bytesFromInt(dtype: DType, bytes: *const []u8, bitCount: usize, value: dtype.kind) void {
-            var i: usize = 0;
+        fn bytesFromInt(dtype: DType, bytes: *const []u8, bitCount: u64, value: dtype.kind) void {
+            var i: u64 = 0;
             while (i < bitCount) : (i += 1) {
                 const bit = @as(u1, @intCast((value >> @as(std.math.Log2Int(dtype.kind), @intCast(i))) & 1));
                 bytes.*[i / 8] |= @as(u8, bit) << @as(u3, @truncate(@mod(i, 8)));
@@ -691,8 +695,8 @@ pub const dtypes = struct {
     };
 };
 
-fn determineBuffer(comptime T: type, allocator: Allocator, shape: []const usize) Allocator.Error![]u8 {
-    var size: usize = 1;
+fn determineBuffer(comptime T: type, allocator: Allocator, shape: []const u64) Allocator.Error![]u8 {
+    var size: u64 = 1;
 
     for (shape) |dim| {
         size *= dim;
@@ -701,8 +705,8 @@ fn determineBuffer(comptime T: type, allocator: Allocator, shape: []const usize)
     return try allocator.alloc(u8, size * @sizeOf(T) / @sizeOf(u8));
 }
 
-fn determineStrides(allocator: Allocator, shape: []const usize) Allocator.Error![]usize {
-    var strides = try allocator.alloc(usize, shape.len);
+fn determineStrides(allocator: Allocator, shape: []const u64) Allocator.Error![]u64 {
+    var strides = try allocator.alloc(u64, shape.len);
 
     strides[shape.len - 1] = 1;
     var i = shape.len - 1;
@@ -714,10 +718,10 @@ fn determineStrides(allocator: Allocator, shape: []const usize) Allocator.Error!
 }
 
 // follows numpy broadcasting rules
-fn broadcastShape(allocator: Allocator, shape1: []const usize, shape2: []const usize) (Error || Allocator.Error)![]usize {
+fn broadcastShape(allocator: Allocator, shape1: []const u64, shape2: []const u64) (Error || Allocator.Error)![]u64 {
     const max_len = @max(shape1.len, shape2.len);
 
-    var result: []usize = try allocator.alloc(usize, max_len);
+    var result: []u64 = try allocator.alloc(u64, max_len);
     errdefer allocator.free(result);
 
     for (0..max_len) |i| {
@@ -734,12 +738,12 @@ fn broadcastShape(allocator: Allocator, shape1: []const usize, shape2: []const u
     return result[0..max_len];
 }
 
-fn shapeFromStruct(comptime dims: anytype) [dims.len]usize {
+fn shapeFromStruct(comptime dims: anytype) [dims.len]u64 {
     if (@typeInfo(@TypeOf(dims)) != .Struct) {
         @compileError("Dimensions must be a struct");
     }
 
-    var shape: [dims.len]usize = undefined;
+    var shape: [dims.len]u64 = undefined;
     for (dims, 0..) |dim, i| {
         if (dim < 0) {
             @compileError("Dimensions must be positive");
@@ -747,14 +751,14 @@ fn shapeFromStruct(comptime dims: anytype) [dims.len]usize {
 
         shape[i] = switch (@TypeOf(dim)) {
             comptime_int => dim,
-            usize => dim,
-            else => @compileError("Dimensions must be of type comptime_int or usize"),
+            u64 => dim,
+            else => @compileError("Dimensions must be of type comptime_int or u64"),
         };
     }
     return shape;
 }
 
-fn shapeFromInt(dim: anytype) [1]usize {
+fn shapeFromInt(dim: anytype) [1]u64 {
     if (@typeInfo(@TypeOf(dim)) != .Int and @typeInfo(@TypeOf(dim)) != .ComptimeInt) {
         @compileError("Dimensions must be an int");
     }
@@ -763,10 +767,10 @@ fn shapeFromInt(dim: anytype) [1]usize {
         @compileError("Dimensions must be positive");
     }
 
-    return [_]usize{dim};
+    return [_]u64{dim};
 }
 
-fn getShape(dims: anytype) []const usize {
+fn getShape(dims: anytype) []const u64 {
     const array = switch (@typeInfo(@TypeOf(dims))) {
         .Struct => comptime shapeFromStruct(dims),
         .Int => shapeFromInt(dims),
@@ -777,9 +781,9 @@ fn getShape(dims: anytype) []const usize {
     return array[0..];
 }
 
-fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) Allocator.Error![]usize {
-    const dim: usize = struct {
-        fn countDims(slice: anytype, acc: usize) usize {
+fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) Allocator.Error![]u64 {
+    const dim: u64 = struct {
+        fn countDims(slice: anytype, acc: u64) u64 {
             if (@typeInfo(@TypeOf(slice)) == .Pointer) {
                 if (slice.len == 0) {
                     return acc + 1;
@@ -794,10 +798,10 @@ fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) Allocator
         }
     }.countDims(dims, 0);
 
-    const shape: []usize = try allocator.alloc(usize, dim);
+    const shape: []u64 = try allocator.alloc(u64, dim);
 
     struct {
-        fn setShape(_shape: []usize, _slice: anytype, idx: usize) void {
+        fn setShape(_shape: []u64, _slice: anytype, idx: u64) void {
             if (@typeInfo(@TypeOf(_slice)) == .Pointer) {
                 _shape[idx] = _slice.len;
                 if (_slice.len > 0) {

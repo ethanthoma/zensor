@@ -12,7 +12,7 @@ const T = dtype.kind;
 const Tensor = @import("zensor").Tensor(dtype);
 
 const TRIALS = 1000;
-const SIZE = 512;
+const SIZE = 1024;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

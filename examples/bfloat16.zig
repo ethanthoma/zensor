@@ -8,7 +8,8 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    const dtype = dtypes.bfloat16;
+    //const dtype = dtypes.bfloat16;
+    const dtype = dtypes.float16;
 
     var A = try Tensor(dtype).full(allocator, .{ 4, 3 }, 42.0);
     defer A.deinit();

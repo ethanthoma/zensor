@@ -135,14 +135,14 @@ However, I did decide to try a somewhat optimized matmul. You can run the exampl
 via `zig build benchmark -Doptimize=ReleaseFast`. It will yield:
 ```
 Running benchmark:
-        Tensor Type: i32
+        Tensor Type: f32
         Tensor matmul: two 512x512 Tensors
         Number of Trials: 1000
 Validating...
 Starting trials...
 Progress: 1000/1000 (100.0%)
-Total time: 10.094 s for 1000 trials.
-Performance: 26.595 GFLOPS/s
+Total time: 8.239 s for 1000 trials.
+Performance: 32.580 GFLOPS/s
 ```
 
 Which is the performance I get on my AMD Ryzen 7 5700G.
