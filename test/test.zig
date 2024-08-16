@@ -13,10 +13,9 @@ test "empty" {
         const tensor = try Tensor(T).empty(testing.allocator, shape);
         defer tensor.deinit();
 
-        const result: []const u64 = tensor.shape;
-        const expected = ([_]u64{42})[0..];
+        const result: []const u32 = tensor.shape;
 
-        try testing.expectEqualSlices(u64, expected, result);
+        try testing.expectEqual(shape, result[0]);
     }
     {
         const T = dtypes.int32;
@@ -24,10 +23,10 @@ test "empty" {
         const tensor = try Tensor(T).empty(testing.allocator, shape);
         defer tensor.deinit();
 
-        const result: []const u64 = tensor.shape;
-        const expected = ([_]u64{ 1, 2, 3 })[0..];
+        const result: []const u32 = tensor.shape;
+        const expected = ([_]u32{ 1, 2, 3 })[0..];
 
-        try testing.expectEqualSlices(u64, expected, result);
+        try testing.expectEqualSlices(u32, expected, result);
     }
 }
 
@@ -74,8 +73,8 @@ test "fromOwnedSlice" {
         const tensor = try Tensor(T).fromOwnedSlice(allocator, slice);
         defer tensor.deinit();
 
-        const expectedShape = ([_]u64{5})[0..];
-        try testing.expectEqualSlices(u64, expectedShape, tensor.shape);
+        const expectedShape = ([_]u32{5})[0..];
+        try testing.expectEqualSlices(u32, expectedShape, tensor.shape);
 
         const actualData: []const T.kind = @alignCast(@ptrCast(tensor.data()));
         try testing.expectEqualSlices(T.kind, slice, actualData);
@@ -86,8 +85,8 @@ test "fromOwnedSlice" {
         const tensor = try Tensor(T).fromOwnedSlice(allocator, slice);
         defer tensor.deinit();
 
-        const expectedShape = ([_]u64{0})[0..];
-        try testing.expectEqualSlices(u64, expectedShape, tensor.shape);
+        const expectedShape = ([_]u32{0})[0..];
+        try testing.expectEqualSlices(u32, expectedShape, tensor.shape);
 
         const actualData: []const T.kind = @alignCast(@ptrCast(tensor.data()));
         try testing.expectEqualSlices(T.kind, slice, actualData);
@@ -98,8 +97,8 @@ test "fromOwnedSlice" {
         const tensor = try Tensor(T).fromOwnedSlice(allocator, slice);
         defer tensor.deinit();
 
-        const expectedShape = ([_]u64{5})[0..];
-        try testing.expectEqualSlices(u64, expectedShape, tensor.shape);
+        const expectedShape = ([_]u32{5})[0..];
+        try testing.expectEqualSlices(u32, expectedShape, tensor.shape);
 
         const actualData: []const T.kind = @alignCast(@ptrCast(tensor.data()));
         try testing.expectEqualSlices(T.kind, slice, actualData);
@@ -110,8 +109,8 @@ test "fromOwnedSlice" {
         const tensor = try Tensor(T).fromOwnedSlice(allocator, slice);
         defer tensor.deinit();
 
-        const expectedShape = ([_]u64{ 2, 3 })[0..];
-        try testing.expectEqualSlices(u64, expectedShape, tensor.shape);
+        const expectedShape = ([_]u32{ 2, 3 })[0..];
+        try testing.expectEqualSlices(u32, expectedShape, tensor.shape);
 
         const actualData: []const T.kind = @alignCast(@ptrCast(tensor.data()));
         for (slice, 0..) |row, i| {
@@ -127,8 +126,8 @@ test "fromOwnedSlice" {
         const tensor = try Tensor(T).fromOwnedSlice(allocator, slice);
         defer tensor.deinit();
 
-        const expectedShape = ([_]u64{ 2, 2, 2 })[0..];
-        try testing.expectEqualSlices(u64, expectedShape, tensor.shape);
+        const expectedShape = ([_]u32{ 2, 2, 2 })[0..];
+        try testing.expectEqualSlices(u32, expectedShape, tensor.shape);
 
         const actualData: []const i32 = @alignCast(@ptrCast(tensor.data()));
         for (slice, 0..) |plane, i| {
