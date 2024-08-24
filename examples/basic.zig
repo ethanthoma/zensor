@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zensor = @import("zensor");
 const dtype = zensor.dtypes.float32;
-const Tensor = @import("zensor").Tensor(dtype);
+const Tensor = zensor.Tensor(dtype);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

@@ -9,7 +9,7 @@ pub const Error = error{
     WrongType,
 };
 
-pub usingnamespace @import("graph.zig");
+pub usingnamespace @import("cg.zig");
 
 pub var prng = std.Random.DefaultPrng.init(20240807);
 
@@ -31,7 +31,7 @@ pub fn Tensor(comptime dtype: dtypes.DType) type {
         pub usingnamespace Movement(dtype);
         pub usingnamespace Ops(dtype);
 
-        pub fn init(allocator: Allocator, shape: []const u32) Allocator.Error!Self {
+        fn init(allocator: Allocator, shape: []const u32) Allocator.Error!Self {
             return Self{
                 .buffer = try determineBuffer(T, allocator, shape),
                 .shape = try allocator.dupe(u32, shape),
@@ -844,3 +844,53 @@ fn shapeOfSlice(comptime T: type, allocator: Allocator, dims: anytype) Allocator
 
     return shape;
 }
+
+pub const TensorType = enum(u8) {
+    Float16,
+    Float32,
+
+    fn getType(datatype: TensorType) type {
+        return comptime switch (datatype) {
+            TensorType.Float16 => f16,
+            TensorType.Float32 => f32,
+        };
+    }
+};
+
+pub const DynamicTensor = extern struct {
+    const Self = @This();
+
+    datatype: TensorType,
+    data: [*]u8,
+
+    fn Narrow(comptime self: Self) type {
+        return Tensor(self.datatype);
+    }
+
+    pub fn narrow(comptime self: *const Self) *const Narrow(self.*) {
+        return @ptrCast(self);
+    }
+
+    pub fn init(allocator: Allocator, comptime datatype: TensorType, data: []u8) Self {
+        return Self{ .datatype = datatype, .data = data, .allocator = allocator };
+    }
+
+    pub fn deinit(self: Self) void {
+        self.allocator.free(self.data);
+    }
+
+    pub fn full(allocator: Allocator, comptime datatype: TensorType, length: u32, value: anytype) (Error || Allocator.Error)!Self {
+        const Type = comptime datatype.getType();
+        const data = try allocator.alloc(u8, length * @sizeOf(Type));
+        @memset(data, value);
+        return Self.init(allocator, datatype, data);
+    }
+
+    pub fn printData(self: Self) void {
+        const Type = comptime self.datatype.getType();
+        const data = mem.bytesAsSlice(Type, self.data);
+        for (data) |elem| {
+            std.debug.print("{}, ", .{elem});
+        }
+    }
+};
