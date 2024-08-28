@@ -1,76 +1,83 @@
 const std = @import("std");
 
 const zensor = @import("zensor");
-const Tensor = zensor.tensor;
-const Node = zensor.Node;
-const Operations = zensor.Operations;
-const Shape = zensor.Shape;
-const View = zensor.View;
-const Numpy = zensor.Numpy;
-const RuntimeBuffer = zensor.RuntimeBuffer;
-const MemoryManager = zensor.MemoryManager;
-const Scheduler = zensor.Scheduler;
-const dtypes = zensor.dtypes;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
     // ** Load in Numpy tensor as u8 buffer **
-    const n: RuntimeBuffer = try Numpy.load(allocator, "./examples/numpy.npy");
+    const n = try zensor.buffer.Numpy.load(allocator, "./examples/numpy.npy");
 
     // ** create comptime buffer id **
-    const buffer_id = comptime MemoryManager.create_id(opaque {});
+    const buffer_id = comptime zensor.MemoryManager.create_id(opaque {});
 
     // ** create memory manager that links comptime nodes with runtime buffers **
-    var memory_manager: MemoryManager = MemoryManager.init();
+    var memory_manager = zensor.MemoryManager.init();
     try memory_manager.set_buffer(allocator, buffer_id, n);
 
     // ** create comptime nodes **
-    const load_node: *const Node = comptime blk: {
+    const dtype = comptime zensor.dtypes.int64;
+
+    const load_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view: *const zensor.AnyView = @ptrCast(&View(shape).init());
-        const node = Node.init(
-            Operations.Load,
+        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const node = zensor.ast.Node.init(
+            .Load,
             .{ .buffer_id = buffer_id },
             {},
             view,
-            dtypes.int64,
+            dtype,
         );
 
         break :blk &node;
     };
 
-    const const_node: *const Node = comptime blk: {
+    const const_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view: *const zensor.AnyView = @ptrCast(&View(shape).init());
-        const node = Node.init(
-            Operations.Const,
+        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const node = zensor.ast.Node.init(
+            .Const,
             .{ .value = std.fmt.comptimePrint("{}", .{4}) },
             {},
             view,
-            dtypes.int64,
+            dtype,
         );
         break :blk &node;
     };
 
-    const mul_node: *const Node = comptime blk: {
+    const mul_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view: *const zensor.AnyView = @ptrCast(&View(shape).init());
-        const node = Node.init(
-            Operations.Mul,
+        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const node = zensor.ast.Node.init(
+            .Mul,
             {},
-            [2]*const Node{ load_node, const_node },
+            [_]*const zensor.ast.Node{ load_node, const_node },
             view,
-            dtypes.int64,
+            dtype,
         );
         break :blk &node;
     };
 
-    // ** schedule comptime node **
-    const scheduler = Scheduler.init(allocator, memory_manager);
-    var execution_plan = try scheduler.run(mul_node);
-    defer execution_plan.deinit();
+    const sum_node = comptime blk: {
+        const shape = &[_]u32{1};
+        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const node = zensor.ast.Node.init(
+            .Sum,
+            .{ .dim = 0 },
+            [_]*const zensor.ast.Node{mul_node},
+            view,
+            dtype,
+        );
+        break :blk &node;
+    };
 
-    std.debug.print("Execution Plan: {}\n", .{execution_plan});
+    // ** schedule comptime ast **
+    const schedule = comptime zensor.Scheduler.run(sum_node);
+
+    // ** IR generator **
+    var ir_generator = zensor.IRGenerator.init(allocator);
+    defer ir_generator.deinit();
+    const ir_block = try ir_generator.run(schedule);
+    std.debug.print("{}\n", .{ir_block});
 }
