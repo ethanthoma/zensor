@@ -2,24 +2,41 @@ const std = @import("std");
 
 const ast = @import("./ast.zig");
 
-const Schedule = struct {
+pub const Schedule = struct {
     nodes: []const *const ast.Node,
     output_buffer_id: u32,
-    global_buffers: StaticMap(u32, bool),
-    reduce_accumulators: StaticMap(*const ast.Node, void),
+    global_buffers: []const ast.BufferID,
 
     pub fn init(
         nodes: []const *const ast.Node,
         output_buffer_id: u32,
-        global_buffers: StaticMap(u32, bool),
-        reduce_accumulators: StaticMap(*const ast.Node, void),
+        global_buffers: []const ast.BufferID,
     ) @This() {
         return .{
             .nodes = nodes,
             .output_buffer_id = output_buffer_id,
             .global_buffers = global_buffers,
-            .reduce_accumulators = reduce_accumulators,
         };
+    }
+
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("{{[{}]ast.Nodes, ", .{self.nodes.len});
+        try writer.print("{}, ", .{self.output_buffer_id});
+        try writer.print("[", .{});
+        for (self.global_buffers, 0..) |buffer_id, i| {
+            try writer.print("{any}", .{buffer_id});
+            if (i < self.global_buffers.len - 1) {
+                try writer.print(", ", .{});
+            }
+        }
+        try writer.print("]}}", .{});
     }
 };
 
@@ -33,17 +50,39 @@ fn ast_node_eql(lhs: *const ast.Node, rhs: *const ast.Node) bool {
     return lhs == rhs;
 }
 
-pub fn run(comptime node: *const ast.Node) []const *const ast.Node {
+fn buffer_id_eql(lhs: ast.BufferID, rhs: ast.BufferID) bool {
+    return lhs == rhs;
+}
+
+// TODO: split ast into multiple kernels
+pub fn run(comptime node: *const ast.Node) []const Schedule {
     comptime {
         var visited = StaticArrayList(*const ast.Node).init(ast_node_eql);
-
         var order = StaticArrayList(*const ast.Node).init(ast_node_eql);
+        var buffers = StaticArrayList(ast.BufferID).init(buffer_id_eql);
 
-        topological_sort(node, &visited, &order);
+        // TODO: I need to generate a buffer_id, idk how to tho
+        const buffer_id = 12345;
 
-        const final_order = order.buffer;
+        const store_node = &ast.Node.init(
+            .Store,
+            .{ .buffer_id = buffer_id },
+            [_]*const ast.Node{node},
+            node.view,
+            node.dtype,
+        );
 
-        return final_order;
+        topological_sort(store_node, &visited, &order, &buffers);
+
+        const schedule = Schedule.init(
+            order.buffer,
+            buffer_id,
+            buffers.buffer,
+        );
+
+        const schedules: []const Schedule = &[_]Schedule{schedule};
+
+        return schedules;
     }
 }
 
@@ -51,10 +90,21 @@ fn topological_sort(
     comptime node: *const ast.Node,
     comptime visited: *StaticArrayList(*const ast.Node),
     comptime order: *StaticArrayList(*const ast.Node),
+    comptime buffers: *StaticArrayList(ast.BufferID),
 ) void {
     comptime {
         if (visited.contains(node)) {
             return;
+        }
+
+        switch (node.op) {
+            .Load => {
+                buffers.append(node.arg.Load.buffer_id);
+            },
+            .Store => {
+                buffers.append(node.arg.Store.buffer_id);
+            },
+            else => {},
         }
 
         visited.append(node);
@@ -63,7 +113,7 @@ fn topological_sort(
 
         if (@typeInfo(@TypeOf(inputs)) == .Array) {
             for (inputs) |input| {
-                topological_sort(input, visited, order);
+                topological_sort(input, visited, order, buffers);
             }
         }
 

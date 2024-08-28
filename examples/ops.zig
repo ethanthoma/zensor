@@ -21,7 +21,7 @@ pub fn main() !void {
 
     const load_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const view = zensor.View(shape).init().to_any_view();
         const node = zensor.ast.Node.init(
             .Load,
             .{ .buffer_id = buffer_id },
@@ -35,7 +35,7 @@ pub fn main() !void {
 
     const const_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const view = zensor.View(shape).init().to_any_view();
         const node = zensor.ast.Node.init(
             .Const,
             .{ .value = std.fmt.comptimePrint("{}", .{4}) },
@@ -48,7 +48,7 @@ pub fn main() !void {
 
     const mul_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const view = zensor.View(shape).init().to_any_view();
         const node = zensor.ast.Node.init(
             .Mul,
             {},
@@ -61,7 +61,7 @@ pub fn main() !void {
 
     const sum_node = comptime blk: {
         const shape = &[_]u32{1};
-        const view: *const zensor.AnyView = @ptrCast(&zensor.View(shape).init());
+        const view = zensor.View(shape).init().to_any_view();
         const node = zensor.ast.Node.init(
             .Sum,
             .{ .dim = 0 },
@@ -73,11 +73,12 @@ pub fn main() !void {
     };
 
     // ** schedule comptime ast **
-    const schedule = comptime zensor.Scheduler.run(sum_node);
+    const schedules = comptime zensor.Scheduler.run(sum_node);
+    std.debug.print("Schedules: {any}\n", .{schedules});
 
     // ** IR generator **
     var ir_generator = zensor.IRGenerator.init(allocator);
     defer ir_generator.deinit();
-    const ir_block = try ir_generator.run(schedule);
+    const ir_block = try ir_generator.run(schedules[0]);
     std.debug.print("{}\n", .{ir_block});
 }

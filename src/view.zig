@@ -65,7 +65,7 @@ pub fn View(comptime shape: []const u32) type {
                 };
             }
 
-            pub fn toAnyView(comptime self: *const Self) *const AnyView {
+            pub fn to_any_view(comptime self: *const Self) *const AnyView {
                 return @ptrCast(self);
             }
 

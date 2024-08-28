@@ -2,13 +2,14 @@ const std = @import("std");
 
 const ir = @import("./ir.zig");
 const ast = @import("./ast.zig");
+const Scheduler = @import("./Scheduler.zig");
 
 const Self = @This();
 
 allocator: std.mem.Allocator,
 block: ir.IRBlock,
 node_map: std.AutoHashMap(*const ast.Node, u32),
-buffer_map: std.AutoHashMap(u32, u32),
+buffer_map: std.AutoHashMap(ast.BufferID, u32),
 reduce_acc_map: std.AutoHashMap(*const ast.Node, u32),
 
 pub fn init(allocator: std.mem.Allocator) Self {
@@ -16,7 +17,7 @@ pub fn init(allocator: std.mem.Allocator) Self {
         .allocator = allocator,
         .block = undefined,
         .node_map = std.AutoHashMap(*const ast.Node, u32).init(allocator),
-        .buffer_map = std.AutoHashMap(u32, u32).init(allocator),
+        .buffer_map = std.AutoHashMap(ast.BufferID, u32).init(allocator),
         .reduce_acc_map = std.AutoHashMap(*const ast.Node, u32).init(allocator),
     };
 }
@@ -27,31 +28,11 @@ pub fn deinit(self: *Self) void {
     self.reduce_acc_map.deinit();
 }
 
-pub fn run(self: *Self, comptime schedule: []const *const ast.Node) !ir.IRBlock {
+pub fn run(self: *Self, comptime schedule: Scheduler.Schedule) !ir.IRBlock {
     self.block = ir.IRBlock.init(self.allocator);
 
-    const stored_schedule = comptime blk: {
-        var stored_schedule: [schedule.len + 1]*const ast.Node = undefined;
-
-        @memcpy(stored_schedule[0..schedule.len], schedule);
-
-        const last_node = schedule[schedule.len - 1];
-
-        stored_schedule[schedule.len] = &ast.Node.init(
-            .Store,
-            // TODO: I need to generate a buffer_id, idk how to tho
-            .{ .buffer_id = 12345 },
-            [_]*const ast.Node{last_node},
-            last_node.view,
-            last_node.dtype,
-        );
-
-        const final_stored_schedule = stored_schedule;
-        break :blk final_stored_schedule;
-    };
-
-    try self.define_global_buffers(&stored_schedule);
-    try self.define_reduce_accumulators(&stored_schedule);
+    try self.define_global_buffers(schedule);
+    try self.define_reduce_accumulators(schedule);
 
     const start_of_range = try self.block.append(
         .CONST,
@@ -64,7 +45,7 @@ pub fn run(self: *Self, comptime schedule: []const *const ast.Node) !ir.IRBlock 
         .CONST,
         .Int,
         null,
-        try std.fmt.allocPrint(self.allocator, "{}", .{stored_schedule[0].view.size}),
+        try std.fmt.allocPrint(self.allocator, "{}", .{schedule.nodes[0].view.size}),
     );
 
     const loop_index = try self.block.append(
@@ -77,7 +58,7 @@ pub fn run(self: *Self, comptime schedule: []const *const ast.Node) !ir.IRBlock 
         {},
     );
 
-    inline for (stored_schedule) |node| {
+    inline for (schedule.nodes) |node| {
         try self.process_node(node, loop_index);
     }
 
@@ -91,42 +72,20 @@ pub fn run(self: *Self, comptime schedule: []const *const ast.Node) !ir.IRBlock 
     return self.block;
 }
 
-fn define_global_buffers(self: *Self, comptime schedule: []const *const ast.Node) !void {
-    inline for (schedule) |node| {
-        switch (node.op) {
-            .Load => {
-                const buffer_id = node.arg.Load.buffer_id;
-                if (!self.buffer_map.contains(buffer_id)) {
-                    const ir_node = try self.block.append(
-                        .DEFINE_GLOBAL,
-                        .Pointer,
-                        null,
-                        .{
-                            .idx = buffer_id,
-                            .name = try std.fmt.allocPrintZ(self.allocator, "data{}", .{buffer_id}),
-                            .writable = false,
-                        },
-                    );
-                    try self.buffer_map.put(buffer_id, ir_node);
-                }
-            },
-            .Store => {
-                const buffer_id = node.arg.Store.buffer_id;
-                if (!self.buffer_map.contains(buffer_id)) {
-                    const ir_node = try self.block.append(
-                        .DEFINE_GLOBAL,
-                        .Pointer,
-                        null,
-                        .{
-                            .idx = buffer_id,
-                            .name = try std.fmt.allocPrintZ(self.allocator, "data{}", .{buffer_id}),
-                            .writable = true,
-                        },
-                    );
-                    try self.buffer_map.put(buffer_id, ir_node);
-                }
-            },
-            else => {},
+fn define_global_buffers(self: *Self, comptime schedule: Scheduler.Schedule) !void {
+    inline for (schedule.global_buffers) |buffer_id| {
+        if (!self.buffer_map.contains(buffer_id)) {
+            const ir_node = try self.block.append(
+                .DEFINE_GLOBAL,
+                .Pointer,
+                null,
+                .{
+                    .idx = buffer_id,
+                    .name = try std.fmt.allocPrintZ(self.allocator, "data{}", .{buffer_id}),
+                    .writable = false,
+                },
+            );
+            try self.buffer_map.put(buffer_id, ir_node);
         }
     }
 }
@@ -138,8 +97,8 @@ fn isReduceOp(op: ast.Operations) bool {
     };
 }
 
-fn define_reduce_accumulators(self: *Self, comptime schedule: []const *const ast.Node) !void {
-    inline for (schedule) |node| {
+fn define_reduce_accumulators(self: *Self, comptime schedule: Scheduler.Schedule) !void {
+    inline for (schedule.nodes) |node| {
         if (isReduceOp(node.op)) {
             const acc = try self.block.append(
                 .DEFINE_ACC,
