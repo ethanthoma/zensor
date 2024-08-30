@@ -73,7 +73,8 @@ pub fn run(self: *Self, comptime schedule: Scheduler.Schedule) !ir.IRBlock {
 }
 
 fn define_global_buffers(self: *Self, comptime schedule: Scheduler.Schedule) !void {
-    inline for (schedule.global_buffers) |buffer_id| {
+    inline for (schedule.global_buffers) |buffer_ctx| {
+        const buffer_id = buffer_ctx.id;
         if (!self.buffer_map.contains(buffer_id)) {
             const ir_node = try self.block.append(
                 .DEFINE_GLOBAL,
@@ -82,7 +83,7 @@ fn define_global_buffers(self: *Self, comptime schedule: Scheduler.Schedule) !vo
                 .{
                     .idx = buffer_id,
                     .name = try std.fmt.allocPrintZ(self.allocator, "data{}", .{buffer_id}),
-                    .writable = false,
+                    .writable = buffer_ctx.writable,
                 },
             );
             try self.buffer_map.put(buffer_id, ir_node);

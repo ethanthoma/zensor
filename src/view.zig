@@ -12,10 +12,10 @@ pub const AnyView = extern struct {
     size: u32,
 
     fn AsView(comptime self: *const Self) type {
-        return View(self.shape);
+        return View(self.shape[0..self.rank]);
     }
 
-    pub fn to(comptime self: *const Self) Self.AsView(self.*) {
+    pub fn as_view(comptime self: *const Self) *const Self.AsView(self) {
         return @ptrCast(self);
     }
 };
@@ -34,6 +34,14 @@ pub fn View(comptime shape: []const u32) type {
             break :blk strides;
         };
 
+        const size = blk: {
+            var size = 1;
+            for (shape) |dim| {
+                size *= dim;
+            }
+            break :blk size;
+        };
+
         return extern struct {
             const Self = @This();
 
@@ -46,14 +54,6 @@ pub fn View(comptime shape: []const u32) type {
             size: u32,
 
             pub fn init() Self {
-                const size = comptime blk: {
-                    var size = 1;
-                    for (shape) |dim| {
-                        size *= dim;
-                    }
-                    break :blk size;
-                };
-
                 return Self{
                     .shape = shape[0..],
                     .strides = strides[0..],
@@ -65,8 +65,49 @@ pub fn View(comptime shape: []const u32) type {
                 };
             }
 
-            pub fn to_any_view(comptime self: *const Self) *const AnyView {
-                return @ptrCast(self);
+            pub fn as_any_view(comptime self: *const Self) *const AnyView {
+                comptime {
+                    return @ptrCast(self);
+                }
+            }
+
+            pub fn Reduce(comptime self: *const Self, comptime dim: u32) type {
+                if (dim >= rank) @compileError("Dimension out of bounds");
+
+                const new_shape: []const u32 = comptime blk: {
+                    var new_shape: [rank]u32 = self.shape.*;
+                    new_shape[dim] = 1;
+                    const final_shape = new_shape;
+                    break :blk final_shape[0..];
+                };
+
+                return View(new_shape);
+            }
+
+            pub fn reduce(comptime self: *const Self, comptime dim: u32) self.Reduce(dim) {
+                comptime {
+                    if (dim >= rank) @compileError("Dimension out of bounds");
+
+                    var new_shape: [rank]u32 = self.shape.*;
+                    new_shape[dim] = 1;
+                    const final_shape = new_shape;
+
+                    var new_strides: [rank]u32 = self.strides.*;
+                    new_strides[dim] = 0; // Set stride to 0 for the reduced dimension
+                    const final_strides = new_strides;
+
+                    const new_size: u32 = self.size / self.shape[dim];
+
+                    return self.Reduce(dim){
+                        .shape = final_shape[0..],
+                        .strides = final_strides[0..],
+                        .offset = self.offset,
+                        .mask = self.mask,
+                        .contiguous = false, // Reducing a dimension typically makes the view non-contiguous
+                        .rank = rank,
+                        .size = new_size,
+                    };
+                }
             }
 
             pub fn format(

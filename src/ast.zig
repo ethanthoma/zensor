@@ -18,11 +18,9 @@ pub const Operations = enum {
     pub const Arg = union(Operations) {
         Mul: void,
         Load: struct {
-            buffer_id: BufferID,
+            name: []const u8,
         },
-        Store: struct {
-            buffer_id: BufferID,
-        },
+        Store: void,
         Const: struct {
             value: []const u8,
         },
@@ -63,6 +61,72 @@ pub const Node = struct {
             .view = anyview,
             .dtype = dtype,
         };
+    }
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+
+        try self.formatHelper(writer, 0, false, "");
+    }
+
+    fn formatHelper(
+        self: Self,
+        writer: anytype,
+        count: u32,
+        is_last: bool,
+        prefix: []const u8,
+    ) !void {
+        try writer.print("{d} ", .{count});
+        try writer.writeAll(prefix);
+        if (count > 0) {
+            try writer.writeAll(if (is_last) "┗━" else "┣━");
+        }
+        try writer.print("{s} ", .{@tagName(self.op)});
+
+        switch (self.op) {
+            .Mul => {},
+            .Load => try writer.print("MemBuffer(idx={s}, dtype={}, shape={any})", .{
+                self.arg.Load.name,
+                self.dtype,
+                self.view.shape[0..self.view.rank],
+            }),
+            .Store => try writer.print("MemBuffer(idx={}, dtype={}, shape={any})", .{
+                0, // Assuming store always uses index 0, adjust if needed
+                self.dtype,
+                self.view.shape[0..self.view.rank],
+            }),
+            .Const => try writer.print("{s}", .{self.arg.Const.value}),
+            .Sum => try writer.print("({d},)", .{self.arg.Sum.dim}),
+        }
+
+        const new_prefix = if (count == 0) "" else if (is_last) "  " else "│ ";
+        const full_prefix = try std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ prefix, new_prefix });
+        defer std.heap.page_allocator.free(full_prefix);
+
+        switch (self.input) {
+            .Mul => |children| {
+                try writer.writeAll("\n");
+                try children[0].formatHelper(writer, count + 1, false, full_prefix);
+
+                try writer.writeAll("\n");
+                try children[1].formatHelper(writer, count + 2, true, full_prefix);
+            },
+            .Store => |child| {
+                try writer.writeAll("\n");
+                try child[0].formatHelper(writer, count + 1, true, full_prefix);
+            },
+            .Sum => |child| {
+                try writer.writeAll("\n");
+                try child[0].formatHelper(writer, count + 1, true, full_prefix);
+            },
+            else => {},
+        }
     }
 };
 

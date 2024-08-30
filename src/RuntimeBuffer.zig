@@ -2,12 +2,35 @@ const std = @import("std");
 
 const dtypes = @import("./dtypes.zig");
 
-pub const RuntimeBuffer = struct {
-    ptr: []const u8,
-    len: u32,
-    dtype: dtypes.DataType,
-    shape: []const u32,
-};
+const RuntimeBuffer = @This();
+
+allocator: std.mem.Allocator,
+ptr: []const u8,
+len: u32,
+dtype: dtypes.DataType,
+shape: []const u32,
+
+pub fn init(allocator: std.mem.Allocator, dtype: dtypes.DataType, shape: []const u32) !RuntimeBuffer {
+    var len: u32 = 1;
+    for (shape) |dim| {
+        len *= dim;
+    }
+
+    const size = (len * dtype.bits + 7) / 8;
+
+    return .{
+        .allocator = allocator,
+        .ptr = try allocator.alloc(u8, size),
+        .len = len,
+        .dtype = dtype,
+        .shape = try allocator.dupe(u32, shape),
+    };
+}
+
+pub fn deinit(self: *RuntimeBuffer) void {
+    self.allocator.free(self.ptr);
+    self.allocator.free(self.shape);
+}
 
 pub const Numpy = struct {
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !RuntimeBuffer {
@@ -71,7 +94,8 @@ pub const Numpy = struct {
 
         try reader.readNoEof(data);
 
-        return RuntimeBuffer{
+        return .{
+            .allocator = allocator,
             .ptr = data,
             .len = size,
             .dtype = datatype,

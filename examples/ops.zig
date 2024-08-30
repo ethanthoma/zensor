@@ -7,24 +7,22 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // ** Load in Numpy tensor as u8 buffer **
-    const n = try zensor.buffer.Numpy.load(allocator, "./examples/numpy.npy");
-
-    // ** create comptime buffer id **
-    const buffer_id = comptime zensor.MemoryManager.create_id(opaque {});
-
-    // ** create memory manager that links comptime nodes with runtime buffers **
-    var memory_manager = zensor.MemoryManager.init();
-    try memory_manager.set_buffer(allocator, buffer_id, n);
+    const filename: []const u8 = "./examples/numpy.npy";
+    var buffer: *zensor.RuntimeBuffer = blk: {
+        var buffer = try zensor.RuntimeBuffer.Numpy.load(allocator, filename);
+        break :blk &buffer;
+    };
+    defer buffer.deinit();
 
     // ** create comptime nodes **
     const dtype = comptime zensor.dtypes.int64;
 
     const load_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view = zensor.View(shape).init().to_any_view();
+        const view = zensor.View(shape).init().as_any_view();
         const node = zensor.ast.Node.init(
             .Load,
-            .{ .buffer_id = buffer_id },
+            .{ .name = filename },
             {},
             view,
             dtype,
@@ -35,7 +33,7 @@ pub fn main() !void {
 
     const const_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view = zensor.View(shape).init().to_any_view();
+        const view = zensor.View(shape).init().as_any_view();
         const node = zensor.ast.Node.init(
             .Const,
             .{ .value = std.fmt.comptimePrint("{}", .{4}) },
@@ -48,7 +46,7 @@ pub fn main() !void {
 
     const mul_node = comptime blk: {
         const shape = &[_]u32{3};
-        const view = zensor.View(shape).init().to_any_view();
+        const view = zensor.View(shape).init().as_any_view();
         const node = zensor.ast.Node.init(
             .Mul,
             {},
@@ -61,7 +59,7 @@ pub fn main() !void {
 
     const sum_node = comptime blk: {
         const shape = &[_]u32{1};
-        const view = zensor.View(shape).init().to_any_view();
+        const view = zensor.View(shape).init().as_any_view();
         const node = zensor.ast.Node.init(
             .Sum,
             .{ .dim = 0 },
@@ -72,13 +70,25 @@ pub fn main() !void {
         break :blk &node;
     };
 
-    // ** schedule comptime ast **
-    const schedules = comptime zensor.Scheduler.run(sum_node);
-    std.debug.print("Schedules: {any}\n", .{schedules});
+    // ** schedule nodes **
+    var scheduler = zensor.Scheduler.init(allocator);
+    try scheduler.add_buffer(load_node, buffer);
+    try scheduler.schedule(mul_node);
+    try scheduler.schedule(sum_node);
 
-    // ** IR generator **
-    var ir_generator = zensor.IRGenerator.init(allocator);
-    defer ir_generator.deinit();
-    const ir_block = try ir_generator.run(schedules[0]);
-    std.debug.print("{}\n", .{ir_block});
+    const schedule = try scheduler.run(sum_node);
+    std.debug.print("Schedule: {}\n", .{schedule});
+
+    // ** schedule comptime ast **
+
+    if (false) {
+        const schedules = comptime zensor.Scheduler.run(sum_node);
+        std.debug.print("Schedules: {any}\n", .{schedules});
+
+        // ** IR generator **
+        var ir_generator = zensor.IRGenerator.init(allocator);
+        defer ir_generator.deinit();
+        const ir_block = try ir_generator.run(schedules[0]);
+        std.debug.print("{}\n", .{ir_block});
+    }
 }

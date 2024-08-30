@@ -8,13 +8,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/" ++ LIBRARY_NAME ++ ".zig"),
     });
 
-    const cgModule = b.addModule("cg", .{
-        .root_source_file = b.path("src/" ++ "cg" ++ ".zig"),
-    });
+    //addTest(b, target, optimize, zensorModule);
 
-    addTest(b, target, optimize, zensorModule);
-
-    addExamples(b, target, optimize, cgModule);
+    addExamples(b, target, optimize, zensorModule);
 }
 
 fn addTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lib_mod: *std.Build.Module) void {
@@ -61,10 +57,12 @@ const TEST_NAMES = &.{
 
 const EXAMPLES_DIR = "examples/";
 
+// TODO: auto crawl
 const EXAMPLE_NAMES = &.{
     "basic",
     "benchmark",
     "bfloat16",
     "compute_graph",
     "ops",
+    "tensor",
 };

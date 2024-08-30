@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const BufferID = @import("./ast.zig").BufferID;
 
 pub const IRDataTypes = enum {
