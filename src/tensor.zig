@@ -124,8 +124,10 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
 
         /// Adds the node to the scheduler. Should be known at comptime.
         /// The user should never need to call this.
-        pub fn realize(self: Self) void {
-            try self.scheduler.run(node);
+        pub fn realize(self: Self) !void {
+            try self.scheduler.schedule(node);
+            const schedules = try self.scheduler.run(node);
+            std.debug.print("\n{}\n", .{schedules});
         }
 
         fn mul_node(comptime lhs: *const ast.Node, comptime rhs: *const ast.Node) *const ast.Node {
@@ -181,6 +183,33 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
                 anyview.as_view().reduce(dim).as_any_view().*,
                 n,
             ).init(self.scheduler);
+        }
+
+        pub fn format(
+            self: Self,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = options;
+            _ = fmt;
+
+            try self.realize();
+
+            try writer.print("Tensor(\n", .{});
+
+            try writer.print("\ttype: {},\n", .{dtype});
+
+            try writer.print("\tshape: [", .{});
+            for (anyview.shape, 0..anyview.rank) |dim, i| {
+                if (i > 0) try writer.print(", ", .{});
+                try writer.print("{}", .{dim});
+            }
+            try writer.print("],\n", .{});
+
+            try writer.print("\tlength: {},\n", .{anyview.size});
+
+            try writer.print(")", .{});
         }
     };
 }

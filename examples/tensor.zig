@@ -22,5 +22,6 @@ pub fn main() !void {
 
     const d = try c.sum(0);
 
-    d.realize();
+    try c.realize();
+    try d.realize();
 }

@@ -1,23 +1,27 @@
 const std = @import("std");
 
 const ast = @import("./ast.zig");
+const dtypes = @import("./dtypes.zig");
+const view = @import("./view.zig");
 const RuntimeBuffer = @import("./RuntimeBuffer.zig");
 
 const Scheduler = @This();
 
 allocator: std.mem.Allocator,
 scheduled_nodes: std.AutoHashMap(*const ast.Node, bool),
-visited: std.AutoHashMap(*const ast.Node, void),
+visited: std.AutoHashMap(*const ast.Node, usize),
 schedules: std.AutoHashMap(*const ast.Node, *const Schedule),
 buffers: std.AutoHashMap(*const ast.Node, *RuntimeBuffer),
+runtime_nodes: std.ArrayList(*const ast.Node),
 
 pub fn init(allocator: std.mem.Allocator) Scheduler {
     return .{
         .allocator = allocator,
-        .scheduled_nodes = std.AutoHashMap(comptime *const ast.Node, bool).init(allocator),
-        .visited = std.AutoHashMap(comptime *const ast.Node, void).init(allocator),
-        .schedules = std.AutoHashMap(comptime *const ast.Node, *const Schedule).init(allocator),
-        .buffers = std.AutoHashMap(comptime *const ast.Node, *RuntimeBuffer).init(allocator),
+        .scheduled_nodes = std.AutoHashMap(*const ast.Node, bool).init(allocator),
+        .visited = std.AutoHashMap(*const ast.Node, usize).init(allocator),
+        .schedules = std.AutoHashMap(*const ast.Node, *const Schedule).init(allocator),
+        .buffers = std.AutoHashMap(*const ast.Node, *RuntimeBuffer).init(allocator),
+        .runtime_nodes = std.ArrayList(*const ast.Node).init(allocator),
     };
 }
 
@@ -30,51 +34,67 @@ pub fn add_buffer(
     comptime ast_node: *const ast.Node,
     buffer: *RuntimeBuffer,
 ) !void {
-    try self.buffers.put(comptime ast_node, buffer);
+    try self.buffers.put(ast_node, buffer);
 }
 
-pub fn run(self: *Scheduler, comptime ast_node: *const ast.Node) !Schedule {
+pub fn run(
+    self: *Scheduler,
+    comptime ast_node: *const ast.Node,
+) (Error || std.mem.Allocator.Error)!*const Schedule {
     var order = std.ArrayList(*const ast.Node).init(self.allocator);
     var buffers = std.AutoHashMap(*const ast.Node, *RuntimeBuffer).init(self.allocator);
     var dependencies = std.ArrayList(*const Schedule).init(self.allocator);
 
-    const final_node = comptime blk: {
-        const node = ast.Node.init(
-            .Store,
-            {},
-            [_]*const ast.Node{ast_node},
-            ast_node.view,
-            ast_node.dtype,
-        );
-        break :blk &node;
-    };
+    const last_node = try self.topological_sort(ast_node, &order, &buffers, &dependencies, .{ .head = ast_node });
 
-    try self.finalize_schedule(final_node, &buffers);
+    _ = try self.finalize_schedule(
+        last_node,
+        &order,
+        &buffers,
+    );
 
-    _ = try self.topological_sort(final_node, &order, &buffers, &dependencies, .{ .head = ast_node });
-
-    const scheduled_node = Schedule.init(order.items, buffers, dependencies.items);
+    const scheduled_node = try self.allocator.create(Schedule);
+    scheduled_node.* = Schedule.init(order.items, buffers, dependencies.items);
 
     try self.scheduled_nodes.put(ast_node, true);
-    try self.schedules.put(ast_node, &scheduled_node);
+    try self.schedules.put(ast_node, scheduled_node);
 
     return scheduled_node;
 }
 
 fn finalize_schedule(
     self: *Scheduler,
-    comptime store_node: *const ast.Node,
+    ast_node: *const ast.Node,
+    order: *std.ArrayList(*const ast.Node),
     buffers: *std.AutoHashMap(*const ast.Node, *RuntimeBuffer),
-) !void {
-    var buffer = try RuntimeBuffer.init(
+) !*const ast.Node {
+    const node = try self.allocator.create(ast.Node);
+    node.* = ast.Node.init(
+        .Store,
+        .{ .name = try std.fmt.allocPrint(self.allocator, "{}", .{@intFromPtr(ast_node)}) },
+        [_]*const ast.Node{ast_node},
+        ast_node.view,
+        ast_node.dtype,
+    );
+    try self.runtime_nodes.append(node);
+    try order.append(node);
+
+    const buffer = try self.allocator.create(RuntimeBuffer);
+    buffer.* = try RuntimeBuffer.init(
         self.allocator,
-        store_node.dtype,
-        store_node.view.shape[0..store_node.view.rank],
+        node.dtype,
+        node.view.shape[0..node.view.rank],
     );
     errdefer buffer.deinit();
-    try self.buffers.put(store_node, &buffer);
-    try buffers.put(store_node, &buffer);
+    try self.buffers.put(node, buffer);
+    try buffers.put(node, buffer);
+
+    return node;
 }
+
+const Error = error{
+    BufferNotAdded,
+};
 
 fn topological_sort(
     self: *Scheduler,
@@ -83,54 +103,79 @@ fn topological_sort(
     buffers: *std.AutoHashMap(*const ast.Node, *RuntimeBuffer),
     dependencies: *std.ArrayList(*const Schedule),
     context: struct { head: *const ast.Node },
-) !*const ast.Node {
-    if (false and self.is_dependency(context.head, ast_node)) {
-        const dependency = try self.get_dependency(ast_node);
+) (Error || std.mem.Allocator.Error)!*const ast.Node {
+    if (self.is_dependency(context.head, ast_node)) {
+        const dependency: *const Schedule = try self.get_dependency(ast_node);
         try dependencies.append(dependency);
 
-        const runtime_buffer_ptr = self.buffers.get(ast_node);
+        const store_node: *const ast.Node = dependency.nodes[dependency.nodes.len - 1];
+        const runtime_buffer_ptr = self.buffers.get(store_node) orelse return Error.BufferNotAdded;
 
-        const load_node = dependency_node(dependency);
+        const load_node = try self.allocator.create(ast.Node);
+        load_node.* = ast.Node.init(
+            .Load,
+            .{ .name = store_node.arg.Store.name },
+            {},
+            store_node.view,
+            store_node.dtype,
+        );
+        try self.runtime_nodes.append(load_node);
 
         try self.buffers.put(load_node, runtime_buffer_ptr);
         try buffers.put(load_node, runtime_buffer_ptr);
 
-        try self.visited.put(ast_node, {});
-        try self.visited.put(load_node, {});
+        try self.visited.put(ast_node, self.runtime_nodes.items.len - 1);
+
+        try order.append(load_node);
 
         return load_node;
     }
 
     if (self.visited.contains(ast_node)) {
-        return ast_node;
+        const index = self.visited.get(ast_node).?;
+        return self.runtime_nodes.items[index];
     }
 
-    try self.visited.put(ast_node, {});
+    const cur_node = try self.allocator.create(ast.Node);
+    cur_node.* = ast_node.*;
+    try self.runtime_nodes.append(cur_node);
 
-    if (is_buffer_op(ast_node.op)) {
-        const buffer = self.buffers.get(ast_node) orelse return error.BufferNotAdded;
-        try buffers.put(ast_node, buffer);
+    try self.visited.put(ast_node, self.runtime_nodes.items.len - 1);
+
+    if (is_buffer_op(cur_node.op)) {
+        const buffer = self.buffers.get(ast_node) orelse return Error.BufferNotAdded;
+        try buffers.put(cur_node, buffer);
     }
 
-    const inputs = @field(ast_node.input, @tagName(ast_node.op));
+    // TODO: clean this up
+    switch (ast_node.input) {
+        .Sum => |inputs| {
+            inline for (inputs, 0..) |input, i| {
+                const node = try self.topological_sort(input, order, buffers, dependencies, context);
+                cur_node.input.Sum[i] = node;
+            }
+        },
+        .Mul => |inputs| {
+            inline for (inputs, 0..) |input, i| {
+                const node = try self.topological_sort(input, order, buffers, dependencies, context);
+                cur_node.input.Mul[i] = node;
+            }
+        },
 
-    if (@typeInfo(@TypeOf(inputs)) == .Array) {
-        inline for (inputs) |input| {
-            ast_node.input = try self.topological_sort(input, order, buffers, dependencies, context);
-        }
+        else => {},
     }
 
-    try order.append(ast_node);
-    return ast_node;
+    try order.append(cur_node);
+    return cur_node;
 }
 
-fn dependency_node(dependency: *Schedule) *const ast.Node {
-    const store_node = dependency.nodes[dependency.node.len - 1];
+fn dependency_node(dependency: *const Schedule) *const ast.Node {
+    const store_node: *const ast.Node = dependency.nodes[dependency.nodes.len - 1];
 
     const load_node: *const ast.Node = &ast.Node.init(
         .Load,
+        .{ .name = store_node.arg.Store.name },
         {},
-        [_]*const ast.Node{store_node},
         store_node.view,
         store_node.dtype,
     );
@@ -142,15 +187,13 @@ fn is_dependency(self: *Scheduler, head: *const ast.Node, ast_node: *const ast.N
     return self.scheduled_nodes.contains(ast_node) and head != ast_node;
 }
 
-fn get_dependency(self: *Scheduler, comptime ast_node: *const ast.Node) !*Schedule {
-    const has_been_scheduled = self.scheduled_nodes.get(ast_node).?;
-
-    if (!has_been_scheduled) {
-        try self.scheduled_nodes.put(ast_node, true);
-        return self.run(ast_node);
+fn get_dependency(self: *Scheduler, comptime ast_node: *const ast.Node) !*const Schedule {
+    if (self.schedules.get(ast_node)) |_schedule| {
+        return _schedule;
     }
 
-    return self.schedules.get(ast_node).?;
+    try self.scheduled_nodes.put(ast_node, true);
+    return try self.run(ast_node);
 }
 
 fn is_buffer_op(op: ast.Operations) bool {
@@ -159,19 +202,6 @@ fn is_buffer_op(op: ast.Operations) bool {
         else => false,
     };
 }
-
-fn ast_node_eql(lhs: *const ast.Node, rhs: *const ast.Node) bool {
-    return lhs == rhs;
-}
-
-fn buffer_id_eql(lhs: BufferContext, rhs: BufferContext) bool {
-    return lhs.id == rhs.id;
-}
-
-const BufferContext = struct {
-    id: ast.BufferID,
-    writable: bool,
-};
 
 pub const Schedule = struct {
     nodes: []const *const ast.Node,
@@ -199,8 +229,19 @@ pub const Schedule = struct {
     ) !void {
         _ = options;
         _ = fmt;
-        try writer.print("{{[{}]ast.Nodes, ", .{self.nodes.len});
-        try writer.print("[", .{});
+        try writer.writeAll("Schedule {\n");
+
+        try writer.print("topological sort: [{}]ast.Nodes{{", .{self.nodes.len});
+        for (self.nodes, 0..) |node, i| {
+            try writer.print("{s}", .{@tagName(node.op)});
+
+            if (i < self.nodes.len - 1) {
+                try writer.writeAll(", ");
+            }
+        }
+        try writer.writeAll("}, \n");
+
+        try writer.writeAll("global buffers: [");
         var iter = self.global_buffers.iterator();
         var first = true;
         while (iter.next()) |entry| {
@@ -211,10 +252,16 @@ pub const Schedule = struct {
                 try writer.print(", ", .{});
             }
 
-            try writer.print("{}@{x}", .{ op, @intFromPtr(runtime_buffer_ptr) });
+            try writer.print("{s}@{x}", .{ @tagName(op), @intFromPtr(runtime_buffer_ptr) });
 
             first = false;
         }
-        try writer.print("]}}", .{});
+        try writer.writeAll("],\n");
+
+        try writer.print("dependencies count: {},\n", .{self.dependencies.len});
+
+        try writer.print("AST:\n{},\n", .{self.nodes[self.nodes.len - 1]});
+
+        try writer.writeAll("}");
     }
 };

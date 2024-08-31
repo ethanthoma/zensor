@@ -20,7 +20,9 @@ pub const Operations = enum {
         Load: struct {
             name: []const u8,
         },
-        Store: void,
+        Store: struct {
+            name: []const u8,
+        },
         Const: struct {
             value: []const u8,
         },
@@ -51,8 +53,8 @@ pub const Node = struct {
         comptime op: Operations,
         arg: FieldType(Operations.Arg, op),
         input: FieldType(Operations.Input, op),
-        comptime anyview: *const view.AnyView,
-        comptime dtype: dtypes.DataType,
+        anyview: *const view.AnyView,
+        dtype: dtypes.DataType,
     ) Self {
         return Self{
             .op = op,
@@ -91,13 +93,13 @@ pub const Node = struct {
 
         switch (self.op) {
             .Mul => {},
-            .Load => try writer.print("MemBuffer(idx={s}, dtype={}, shape={any})", .{
+            .Load => try writer.print("RuntimeBuffer(name={s}, dtype={}, shape={any})", .{
                 self.arg.Load.name,
                 self.dtype,
                 self.view.shape[0..self.view.rank],
             }),
-            .Store => try writer.print("MemBuffer(idx={}, dtype={}, shape={any})", .{
-                0, // Assuming store always uses index 0, adjust if needed
+            .Store => try writer.print("RuntimeBuffer(name={s}, dtype={}, shape={any})", .{
+                self.arg.Store.name,
                 self.dtype,
                 self.view.shape[0..self.view.rank],
             }),
@@ -117,11 +119,7 @@ pub const Node = struct {
                 try writer.writeAll("\n");
                 try children[1].formatHelper(writer, count + 2, true, full_prefix);
             },
-            .Store => |child| {
-                try writer.writeAll("\n");
-                try child[0].formatHelper(writer, count + 1, true, full_prefix);
-            },
-            .Sum => |child| {
+            .Store, .Sum => |child| {
                 try writer.writeAll("\n");
                 try child[0].formatHelper(writer, count + 1, true, full_prefix);
             },
