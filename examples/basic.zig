@@ -1,29 +1,27 @@
 const std = @import("std");
 
 const zensor = @import("zensor");
-const dtype = zensor.dtypes.float32;
-const Tensor = zensor.Tensor(dtype);
+const Scheduler = zensor.Scheduler;
+const Tensor = zensor.Tensor;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var A = try Tensor.full(allocator, .{ 4, 3 }, 4);
-    defer A.deinit();
-    std.debug.print("{}\n", .{A});
+    var scheduler: Scheduler = zensor.Scheduler.init(allocator);
 
-    const slice: []const []const f32 = &.{
-        &.{ -3, -2, -1 },
-    };
-    var B = try Tensor.fromOwnedSlice(allocator, slice);
-    defer B.deinit();
-    std.debug.print("{}\n", .{B});
+    const dtype = zensor.dtypes.int64;
+    const shape: []const u32 = &[_]u32{3};
+    const filename = "./examples/numpy.npy";
 
-    var C: Tensor = try A.add(&B);
-    defer C.deinit();
-    std.debug.print("{}\n", .{C});
+    const a = try Tensor(dtype, shape).from_numpy(&scheduler, filename);
 
-    var D = try C.mul(2);
-    try D.reshape(.{ 2, 6 });
-    std.debug.print("{}\n", .{D});
+    const b = try Tensor(dtype, shape).full(&scheduler, 4);
+
+    const c = try a.mul(b);
+
+    const d = try c.sum(0);
+
+    try c.realize();
+    try d.realize();
 }

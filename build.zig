@@ -42,8 +42,6 @@ fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         example.root_module.addImport(LIBRARY_NAME, lib_mod);
         const example_run = b.addRunArtifact(example);
         example_step.dependOn(&example_run.step);
-
-        b.installArtifact(example);
     }
 }
 
@@ -60,9 +58,7 @@ const EXAMPLES_DIR = "examples/";
 // TODO: auto crawl
 const EXAMPLE_NAMES = &.{
     "basic",
-    "benchmark",
-    "bfloat16",
-    "compute_graph",
+    //"benchmark",
+    //"bfloat16",
     "ops",
-    "tensor",
 };
