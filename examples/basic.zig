@@ -22,6 +22,7 @@ pub fn main() !void {
 
     const d = try c.sum(0);
 
-    try c.realize();
-    try d.realize();
+    try c.realize(.CPU);
+    try c.realize(.CPU);
+    try d.realize(.CPU);
 }

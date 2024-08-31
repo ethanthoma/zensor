@@ -108,8 +108,11 @@ pub const Node = struct {
         }
 
         const new_prefix = if (count == 0) "" else if (is_last) "  " else "│ ";
-        const full_prefix = try std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ prefix, new_prefix });
-        defer std.heap.page_allocator.free(full_prefix);
+        const full_prefix = if (@inComptime())
+            prefix ++ new_prefix
+        else
+            try std.fmt.allocPrint(std.heap.page_allocator, "{s}{s}", .{ prefix, new_prefix });
+        defer if (!@inComptime()) std.heap.page_allocator.free(full_prefix);
 
         switch (self.input) {
             .Mul => |children| {

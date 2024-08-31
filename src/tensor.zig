@@ -5,6 +5,7 @@ const dtypes = @import("./dtypes.zig");
 const view = @import("./view.zig");
 const Scheduler = @import("./Scheduler.zig");
 const RuntimeBuffer = @import("./RuntimeBuffer.zig");
+const Device = @import("./backend.zig").Device;
 
 /// Handles Tensor creation.
 /// Maybe there is some abuse of usingnamespace to merge this and the Operations
@@ -124,10 +125,11 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
 
         /// Adds the node to the scheduler. Should be known at comptime.
         /// The user should never need to call this.
-        pub fn realize(self: Self) !void {
+        pub fn realize(self: Self, device: Device) !void {
             try self.scheduler.schedule(node);
             const schedules = try self.scheduler.run(node);
-            std.debug.print("\n{}\n", .{schedules});
+
+            std.debug.print("{s}\n{}\n", .{ @tagName(device), schedules });
         }
 
         fn mul_node(comptime lhs: *const ast.Node, comptime rhs: *const ast.Node) *const ast.Node {

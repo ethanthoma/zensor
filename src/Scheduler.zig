@@ -41,13 +41,17 @@ pub fn run(
     self: *Scheduler,
     comptime ast_node: *const ast.Node,
 ) (Error || std.mem.Allocator.Error)!*const Schedule {
+    if (self.schedules.get(ast_node)) |scheduled_node| {
+        return scheduled_node;
+    }
+
     var order = std.ArrayList(*const ast.Node).init(self.allocator);
     var buffers = std.AutoHashMap(*const ast.Node, *RuntimeBuffer).init(self.allocator);
     var dependencies = std.ArrayList(*const Schedule).init(self.allocator);
 
     const last_node = try self.topological_sort(ast_node, &order, &buffers, &dependencies, .{ .head = ast_node });
 
-    _ = try self.finalize_schedule(
+    try self.finalize_schedule(
         last_node,
         &order,
         &buffers,
@@ -67,7 +71,7 @@ fn finalize_schedule(
     ast_node: *const ast.Node,
     order: *std.ArrayList(*const ast.Node),
     buffers: *std.AutoHashMap(*const ast.Node, *RuntimeBuffer),
-) !*const ast.Node {
+) !void {
     const node = try self.allocator.create(ast.Node);
     node.* = ast.Node.init(
         .Store,
@@ -76,6 +80,7 @@ fn finalize_schedule(
         ast_node.view,
         ast_node.dtype,
     );
+    errdefer self.allocator.destroy(node);
     try self.runtime_nodes.append(node);
     try order.append(node);
 
@@ -88,8 +93,6 @@ fn finalize_schedule(
     errdefer buffer.deinit();
     try self.buffers.put(node, buffer);
     try buffers.put(node, buffer);
-
-    return node;
 }
 
 const Error = error{
@@ -159,6 +162,12 @@ fn topological_sort(
             inline for (inputs, 0..) |input, i| {
                 const node = try self.topological_sort(input, order, buffers, dependencies, context);
                 cur_node.input.Mul[i] = node;
+            }
+        },
+        .Store => |inputs| {
+            inline for (inputs, 0..) |input, i| {
+                const node = try self.topological_sort(input, order, buffers, dependencies, context);
+                cur_node.input.Store[i] = node;
             }
         },
 
