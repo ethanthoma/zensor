@@ -56,8 +56,10 @@ pub fn Tensor(comptime _dtype: dtypes.DataType, comptime _shape: []const u32) ty
             load_node(filename),
         ) {
             const node = comptime load_node(filename);
-            var buffer = try RuntimeBuffer.Numpy.load(scheduler.allocator, filename);
-            try scheduler.add_buffer(node, &buffer);
+            const buffer = try scheduler.allocator.create(RuntimeBuffer);
+            errdefer scheduler.allocator.destroy(buffer);
+            buffer.* = try RuntimeBuffer.Numpy.load(scheduler.allocator, filename);
+            try scheduler.add_buffer(node, buffer);
             return Operations(
                 _dtype,
                 anyview.*,
@@ -126,7 +128,7 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
         /// Adds the node to the scheduler. Should be known at comptime.
         /// The user should never need to call this.
         pub fn realize(self: Self, device: Device) !void {
-            try self.scheduler.schedule(node);
+            try self.scheduler.mark_for_scheduling(node);
             const schedules = try self.scheduler.run(node);
 
             std.debug.print("{s}\n{}\n", .{ @tagName(device), schedules });

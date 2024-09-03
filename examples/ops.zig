@@ -77,7 +77,7 @@ pub fn main() !void {
     try scheduler.schedule(sum_node);
 
     const schedule = try scheduler.run(sum_node);
-    std.debug.print("Schedule: {}\n", .{schedule});
+    std.debug.print("{}\n", .{schedule});
 
     // ** schedule comptime ast **
 
