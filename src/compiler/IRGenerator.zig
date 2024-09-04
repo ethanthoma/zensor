@@ -186,25 +186,29 @@ fn render_above_scope(block: *ir.IRBlock, step: Step, loop_index: Step, context:
     return loop_index;
 }
 
-fn render_loop(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !Step {
-    const range = if (node.op.has_children()) blk: {
-        inline for (std.meta.fields(ast.Operation)) |field| {
-            const op: ast.Operation = @enumFromInt(field.value);
-            if (op == node.op) {
-                const children = @field(node.input, field.name);
-                if (@typeInfo(@TypeOf(children)) == .Array) {
-                    break :blk Range{
-                        .start = 0,
-                        .end = children[0].view.size,
-                    };
-                }
+fn get_range(node: *const ast.Node) Range {
+    // input range
+    switch (node.op) {
+        inline else => |op| {
+            const children = @field(node.input, @tagName(op));
+            if (@typeInfo(@TypeOf(children)) == .Array) {
+                return .{
+                    .start = 0,
+                    .end = children[0].view.size,
+                };
             }
-        }
-        unreachable;
-    } else Range{
+        },
+    }
+
+    // output range
+    return .{
         .start = 0,
         .end = node.view.size,
     };
+}
+
+fn render_loop(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !Step {
+    const range = get_range(node);
 
     // check if in loop
     if (context.loops.getLastOrNull()) |loop_context| {
@@ -213,17 +217,11 @@ fn render_loop(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !St
             return loop_context.step;
         } else {
             // different iteration, end loop
-            _ = try block.append(
-                .ENDLOOP,
-                null,
-                try block.allocator.dupe(u32, &[_]u32{loop_context.step}),
-                {},
-            );
-
-            _ = context.loops.pop();
+            try close_loop(block, context);
         }
     }
 
+    // range of length one, return as const
     if (range.end - range.start == 1) {
         return try block.append(
             .CONST,
@@ -233,37 +231,34 @@ fn render_loop(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !St
         );
     }
 
-    const loop_index = blk: {
-        const start_of_range = try block.append(
-            .CONST,
-            .Int,
-            null,
-            try std.fmt.allocPrint(block.allocator, "{}", .{range.start}),
-        );
+    const start_of_range = try block.append(
+        .CONST,
+        .Int,
+        null,
+        try std.fmt.allocPrint(block.allocator, "{}", .{range.start}),
+    );
 
-        const end_of_range = try block.append(
-            .CONST,
-            .Int,
-            null,
-            try std.fmt.allocPrint(block.allocator, "{}", .{range.end}),
-        );
+    const end_of_range = try block.append(
+        .CONST,
+        .Int,
+        null,
+        try std.fmt.allocPrint(block.allocator, "{}", .{range.end}),
+    );
 
-        const loop_index = try block.append(
-            .LOOP,
-            .Int,
-            try block.allocator.dupe(u32, &[_]u32{
-                start_of_range,
-                end_of_range,
-            }),
-            {},
-        );
+    const loop_index = try block.append(
+        .LOOP,
+        .Int,
+        try block.allocator.dupe(u32, &[_]u32{
+            start_of_range,
+            end_of_range,
+        }),
+        {},
+    );
 
-        try context.loops.append(.{
-            .range = range,
-            .step = loop_index,
-        });
-        break :blk loop_index;
-    };
+    try context.loops.append(.{
+        .range = range,
+        .step = loop_index,
+    });
 
     return loop_index;
 }
