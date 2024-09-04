@@ -1,16 +1,17 @@
 const std = @import("std");
 
-const ast = @import("./ast.zig");
-const dtypes = @import("./dtypes.zig");
-const view = @import("./view.zig");
-const RuntimeBuffer = @import("./RuntimeBuffer.zig");
+const ast = @import("../ast.zig");
+const dtypes = @import("../dtypes.zig");
+const view = @import("../view.zig");
+const RuntimeBuffer = @import("../RuntimeBuffer.zig");
+
 const Schedule = @import("./Schedule.zig");
+const GlobalBuffers = @import("./GlobalBuffers.zig");
 
 const Scheduler = @This();
 
 const Error = error{
     BufferNotAdded,
-    NodeNotScheduled,
 };
 
 pub const NodeStatus = enum {
@@ -19,41 +20,9 @@ pub const NodeStatus = enum {
     Processed,
 };
 
-allocator: std.mem.Allocator,
-node_statuses: std.AutoHashMap(*const ast.Node, NodeStatus),
-schedules: std.AutoHashMap(*const ast.Node, *const Schedule),
-buffers: std.AutoHashMap(*const ast.Node, *RuntimeBuffer),
-
-pub fn init(allocator: std.mem.Allocator) Scheduler {
-    return .{
-        .allocator = allocator,
-        .node_statuses = std.AutoHashMap(*const ast.Node, NodeStatus).init(allocator),
-        .schedules = std.AutoHashMap(*const ast.Node, *const Schedule).init(allocator),
-        .buffers = std.AutoHashMap(*const ast.Node, *RuntimeBuffer).init(allocator),
-    };
-}
-
-pub fn deinit(self: *Scheduler) void {
-    self.node_statuses.deinit();
-    self.schedules.deinit();
-    self.buffers.deinit();
-}
-
-pub fn mark_for_scheduling(self: *Scheduler, comptime node: *const ast.Node) !void {
-    try self.node_statuses.put(node, .Unscheduled);
-}
-
-pub fn add_buffer(
-    self: *Scheduler,
-    comptime node: *const ast.Node,
-    buffer: *RuntimeBuffer,
-) !void {
-    try self.buffers.put(node, buffer);
-}
-
 const Context = struct {
     head: *const ast.Node,
-    buffers: std.AutoArrayHashMap(*const ast.Node, Schedule.BufferContext),
+    buffers: std.ArrayList(Schedule.BufferContext),
     dependencies: std.ArrayList(*const Schedule),
     order: std.ArrayList(*const ast.Node),
     visited: std.AutoHashMap(*const ast.Node, *const ast.Node),
@@ -61,7 +30,7 @@ const Context = struct {
     pub fn init(allocator: std.mem.Allocator, comptime head: *const ast.Node) !@This() {
         return .{
             .head = head,
-            .buffers = std.AutoArrayHashMap(*const ast.Node, Schedule.BufferContext).init(allocator),
+            .buffers = std.ArrayList(Schedule.BufferContext).init(allocator),
             .dependencies = std.ArrayList(*const Schedule).init(allocator),
             .order = std.ArrayList(*const ast.Node).init(allocator),
             .visited = std.AutoHashMap(*const ast.Node, *const ast.Node).init(allocator),
@@ -76,6 +45,38 @@ const Context = struct {
     }
 };
 
+allocator: std.mem.Allocator,
+node_statuses: std.AutoHashMap(*const ast.Node, NodeStatus),
+schedules: std.AutoHashMap(*const ast.Node, *const Schedule),
+global_buffers: GlobalBuffers,
+
+pub fn init(allocator: std.mem.Allocator) Scheduler {
+    return .{
+        .allocator = allocator,
+        .node_statuses = std.AutoHashMap(*const ast.Node, NodeStatus).init(allocator),
+        .schedules = std.AutoHashMap(*const ast.Node, *const Schedule).init(allocator),
+        .global_buffers = GlobalBuffers.init(allocator),
+    };
+}
+
+pub fn deinit(self: *Scheduler) void {
+    self.node_statuses.deinit();
+    self.schedules.deinit();
+    self.global_buffers.deinit();
+}
+
+pub fn mark_for_scheduling(self: *Scheduler, comptime node: *const ast.Node) !void {
+    try self.node_statuses.put(node, .Unscheduled);
+}
+
+pub fn register_buffer(
+    self: *Scheduler,
+    comptime node: *const ast.Node,
+    buffer: *RuntimeBuffer,
+) !void {
+    try self.global_buffers.register_buffer(node, buffer);
+}
+
 pub fn run(
     self: *Scheduler,
     comptime root: *const ast.Node,
@@ -87,14 +88,30 @@ pub fn run(
     var context = try Context.init(self.allocator, root);
     defer context.deinit();
 
-    const last_node = try self.topological_sort(root, &context);
+    const buffer = try self.global_buffers.create_buffer(
+        root.dtype,
+        root.view.shape[0..root.view.rank],
+    );
+    errdefer buffer.deinit();
 
-    try self.finalize_schedule(last_node, &context);
+    const name = try std.fmt.allocPrint(self.allocator, "{x}", .{@intFromPtr(root)});
+    errdefer self.allocator.free(name);
+
+    try context.buffers.append(.{
+        .name = name,
+        .idx = context.buffers.items.len,
+        .buffer = buffer,
+        .writable = true,
+    });
+
+    const last_node = try self.topological_sort(root, &context);
+    const node = try self.create_store_node(last_node, name, buffer, &context);
+    node.input.Store[0] = last_node;
 
     const scheduled_node = try Schedule.from_slices(
         self.allocator,
         context.order.items,
-        context.buffers.values(),
+        context.buffers.items,
         context.dependencies.items,
     );
     errdefer scheduled_node.deinit();
@@ -121,13 +138,7 @@ fn topological_sort(
     const cur_node = try self.create_runtime_node(ast_node, context);
 
     if (cur_node.op.AsOperationType() == .Buffer) {
-        const buffer = self.buffers.get(ast_node) orelse return Error.BufferNotAdded;
-        const name = switch (cur_node.op) {
-            .Load => cur_node.arg.Load.name,
-            .Store => cur_node.arg.Load.name,
-            else => unreachable,
-        };
-        try context.buffers.put(cur_node, .{ .name = name, .buffer = buffer });
+        try self.handle_buffer_node(ast_node, cur_node, context);
     }
 
     if (@typeInfo(std.meta.FieldType(ast.Operation.Input, ast_node.op)) == .Array) {
@@ -143,29 +154,43 @@ fn topological_sort(
     return cur_node;
 }
 
+fn handle_buffer_node(
+    self: *Scheduler,
+    comptime node: *const ast.Node,
+    cur_node: *const ast.Node,
+    context: *Context,
+) !void {
+    const buffer = try self.global_buffers.get_buffer(node);
+
+    const name = switch (cur_node.op) {
+        .Load => cur_node.arg.Load.name,
+        .Store => cur_node.arg.Load.name,
+        else => unreachable,
+    };
+
+    try context.buffers.append(.{
+        .name = name,
+        .idx = context.buffers.items.len,
+        .buffer = buffer,
+        .writable = false,
+    });
+}
+
 fn is_dependency(self: *Scheduler, node: *const ast.Node, context: *Context) bool {
     return self.node_statuses.contains(node) and context.head != node;
 }
 
-fn handle_dependency(self: *Scheduler, comptime ast_node: *const ast.Node, context: *Context) !*const ast.Node {
-    const dependency = try self.get_or_create_schedule(ast_node);
+fn handle_dependency(self: *Scheduler, comptime node: *const ast.Node, context: *Context) !*const ast.Node {
+    const dependency = self.schedules.get(node) orelse try self.run(node);
     try context.dependencies.append(dependency);
 
     const store_node = dependency.nodes[dependency.nodes.len - 1];
     const load_node = try create_load_node(self, store_node, context);
 
-    try context.visited.put(ast_node, load_node);
+    try context.visited.put(node, load_node);
 
     try context.order.append(load_node);
     return load_node;
-}
-
-fn get_or_create_schedule(self: *Scheduler, comptime node: *const ast.Node) !*const Schedule {
-    if (self.schedules.get(node)) |_schedule| {
-        return _schedule;
-    }
-
-    return try self.run(node);
 }
 
 fn create_load_node(self: *Scheduler, store_node: *const ast.Node, context: *Context) !*ast.Node {
@@ -179,9 +204,15 @@ fn create_load_node(self: *Scheduler, store_node: *const ast.Node, context: *Con
         store_node.dtype,
     );
 
-    const buffer = self.buffers.get(store_node) orelse return Error.BufferNotAdded;
-    try self.buffers.put(load_node, buffer);
-    try context.buffers.put(load_node, .{ .name = store_node.arg.Store.name, .buffer = buffer });
+    const buffer = try self.global_buffers.get_buffer(store_node);
+    try self.global_buffers.register_buffer(load_node, buffer);
+
+    try context.buffers.append(.{
+        .name = store_node.arg.Store.name,
+        .idx = context.buffers.items.len,
+        .buffer = buffer,
+        .writable = false,
+    });
 
     return load_node;
 }
@@ -193,37 +224,26 @@ fn create_runtime_node(self: *Scheduler, ast_node: *const ast.Node, context: *Co
     return cur_node;
 }
 
-fn finalize_schedule(
+fn create_store_node(
     self: *Scheduler,
-    last_node: *const ast.Node,
+    load_node: *const ast.Node,
+    name: []const u8,
+    buffer: *RuntimeBuffer,
     context: *Context,
-) !void {
+) !*ast.Node {
     const node = try self.allocator.create(ast.Node);
+    errdefer self.allocator.destroy(node);
+
     node.* = ast.Node.init(
         .Store,
-        .{ .name = try std.fmt.allocPrint(self.allocator, "{}", .{@intFromPtr(last_node)}) },
-        [_]*const ast.Node{last_node},
-        last_node.view,
-        last_node.dtype,
+        .{ .name = name },
+        [_]*const ast.Node{load_node},
+        load_node.view,
+        load_node.dtype,
     );
-    errdefer self.allocator.destroy(node);
+
+    try self.global_buffers.register_buffer(node, buffer);
+
     try context.order.append(node);
-
-    const buffer = try self.create_buffer(node);
-    errdefer buffer.deinit();
-    try self.buffers.put(node, buffer);
-    try context.buffers.put(node, .{ .name = node.arg.Store.name, .buffer = buffer });
-}
-
-fn create_buffer(self: *Scheduler, node: *const ast.Node) !*RuntimeBuffer {
-    const buffer = try self.allocator.create(RuntimeBuffer);
-    errdefer self.allocator.destroy(buffer);
-
-    buffer.* = try RuntimeBuffer.init(
-        self.allocator,
-        node.dtype,
-        node.view.shape[0..node.view.rank],
-    );
-
-    return buffer;
+    return node;
 }

@@ -98,7 +98,7 @@ pub const IRNode = struct {
     step: u32,
     op: IROps,
     dtype: ?IRDataTypes,
-    inputs: ?[]const u32,
+    inputs: ?[]u32,
     arg: IROps.Arg,
 
     pub fn format(
@@ -148,10 +148,12 @@ pub const IRNode = struct {
 pub const IRBlock = struct {
     const Self = @This();
 
+    allocator: std.mem.Allocator,
     nodes: std.ArrayList(IRNode),
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
+            .allocator = allocator,
             .nodes = std.ArrayList(IRNode).init(allocator),
         };
     }
@@ -164,7 +166,7 @@ pub const IRBlock = struct {
         return @intCast(self.nodes.items.len);
     }
 
-    pub fn append(self: *Self, comptime op: IROps, dtype: ?IRDataTypes, inputs: ?[]const u32, arg: std.meta.FieldType(IROps.Arg, op)) !u32 {
+    pub fn append(self: *Self, comptime op: IROps, dtype: ?IRDataTypes, inputs: ?[]u32, arg: std.meta.FieldType(IROps.Arg, op)) !u32 {
         try self.nodes.append(IRNode{
             .step = self.len(),
             .op = op,

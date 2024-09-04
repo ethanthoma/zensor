@@ -72,23 +72,17 @@ pub fn main() !void {
 
     // ** schedule nodes **
     var scheduler = zensor.Scheduler.init(allocator);
-    try scheduler.add_buffer(load_node, buffer);
-    try scheduler.schedule(mul_node);
-    try scheduler.schedule(sum_node);
+    defer scheduler.deinit();
+    try scheduler.register_buffer(load_node, buffer);
+    try scheduler.mark_for_scheduling(mul_node);
+    try scheduler.mark_for_scheduling(sum_node);
 
     const schedule = try scheduler.run(sum_node);
     std.debug.print("{}\n", .{schedule});
 
-    // ** schedule comptime ast **
+    // ** IR generator **
+    var ir_generator = zensor.IRGenerator.init(allocator);
 
-    if (false) {
-        const schedules = comptime zensor.Scheduler.run(sum_node);
-        std.debug.print("Schedules: {any}\n", .{schedules});
-
-        // ** IR generator **
-        var ir_generator = zensor.IRGenerator.init(allocator);
-        defer ir_generator.deinit();
-        const ir_block = try ir_generator.run(schedules[0]);
-        std.debug.print("{}\n", .{ir_block});
-    }
+    const ir_block = try ir_generator.run(schedule);
+    std.debug.print("{}\n", .{ir_block});
 }

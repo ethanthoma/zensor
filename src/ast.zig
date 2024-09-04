@@ -31,6 +31,13 @@ pub const Operation = enum {
         };
     }
 
+    pub fn has_children(self: Operation) bool {
+        return switch (self) {
+            .Load, .Const => false,
+            else => true,
+        };
+    }
+
     pub const Arg = union(Operation) {
         Mul: void,
         Load: struct { name: []const u8 },

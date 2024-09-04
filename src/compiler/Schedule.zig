@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const ast = @import("./ast.zig");
-const RuntimeBuffer = @import("./RuntimeBuffer.zig");
+const ast = @import("../ast.zig");
+const RuntimeBuffer = @import("../RuntimeBuffer.zig");
 
 const Schedule = @This();
 
@@ -79,12 +79,14 @@ pub fn format(
 
     try writer.print("\tdependencies count: {},\n", .{self.dependencies.len});
 
-    try writer.print("\tAST:\n{t1},\n", .{self.nodes[self.nodes.len - 1]});
+    try writer.print("\tAST:\n{t1}\n", .{self.nodes[self.nodes.len - 1]});
 
     try writer.writeAll("}");
 }
 
 pub const BufferContext = struct {
     name: []const u8,
+    idx: usize,
     buffer: *RuntimeBuffer,
+    writable: bool,
 };

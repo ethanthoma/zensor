@@ -3,7 +3,7 @@ const std = @import("std");
 const ast = @import("./ast.zig");
 const dtypes = @import("./dtypes.zig");
 const view = @import("./view.zig");
-const Scheduler = @import("./Scheduler.zig");
+const Scheduler = @import("./compiler/Scheduler.zig");
 const RuntimeBuffer = @import("./RuntimeBuffer.zig");
 const Device = @import("./backend.zig").Device;
 
@@ -50,16 +50,26 @@ pub fn Tensor(comptime _dtype: dtypes.DataType, comptime _shape: []const u32) ty
             }
         }
 
+        fn str_to_hex(comptime str: []const u8) []const u8 {
+            comptime {
+                var hex: []const u8 = "";
+                for (str) |char| {
+                    hex = hex ++ std.fmt.comptimePrint("{x}", .{char});
+                }
+                return hex;
+            }
+        }
+
         pub fn from_numpy(scheduler: *Scheduler, comptime filename: []const u8) !Operations(
             _dtype,
             anyview.*,
-            load_node(filename),
+            load_node(str_to_hex(filename)),
         ) {
-            const node = comptime load_node(filename);
+            const node = comptime load_node(str_to_hex(filename));
             const buffer = try scheduler.allocator.create(RuntimeBuffer);
             errdefer scheduler.allocator.destroy(buffer);
             buffer.* = try RuntimeBuffer.Numpy.load(scheduler.allocator, filename);
-            try scheduler.add_buffer(node, buffer);
+            try scheduler.register_buffer(node, buffer);
             return Operations(
                 _dtype,
                 anyview.*,
