@@ -94,23 +94,6 @@ fn define_global_buffers(block: *ir.IRBlock, schedule: *const Schedule, context:
 }
 
 fn process_node(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !void {
-    var inputs = std.ArrayList(u32).init(block.allocator);
-    defer inputs.deinit();
-
-    const fields = std.meta.fields(ast.Operation);
-    inline for (fields) |field| {
-        const op: ast.Operation = @enumFromInt(field.value);
-        if (op == node.op) {
-            const node_inputs = @field(node.input, @tagName(op));
-            if (@typeInfo(@TypeOf(node_inputs)) == .Array) {
-                for (node_inputs) |input| {
-                    const input_index = context.node_map.get(input).?;
-                    try inputs.append(input_index);
-                }
-            }
-        }
-    }
-
     switch (node.op) {
         .Const => {
             const output = try block.append(
@@ -127,41 +110,20 @@ fn process_node(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !v
             try context.node_map.put(node, output);
         },
         .Mul => {
-            const loop_index = try render_loop(node, block, context);
-            const offset = try get_offset(node, loop_index);
-            const lhs = try get_value(
-                node.input.Mul[0],
-                block,
-                offset,
-                inputs.items[0],
-                context,
-            );
-            const rhs = try get_value(
-                node.input.Mul[1],
-                block,
-                offset,
-                inputs.items[1],
-                context,
-            );
-
-            const output = try block.append(
-                .ALU,
-                .Int,
-                try block.allocator.dupe(u32, &[_]u32{ lhs, rhs }),
-                .Mul,
-            );
-
+            const output = try handle_binary_op(.Mul, node, block, context);
             try context.node_map.put(node, output);
         },
         .Store => {
             const loop_index = try render_loop(node, block, context);
             const buffer = context.buffers.get(node.arg.Store.name).?.step;
             const offset = try get_offset(node, loop_index);
+
+            const input = context.node_map.get(node.input.Store[0]).?;
             const value = try get_value(
                 node.input.Store[0],
                 block,
                 offset,
-                inputs.items[0],
+                input,
                 context,
             );
 
@@ -319,22 +281,78 @@ fn close_loop(block: *ir.IRBlock, context: *Context) !void {
     }
 }
 
+fn handle_binary_op(
+    comptime op: ast.Operation,
+    node: *const ast.Node,
+    block: *ir.IRBlock,
+    context: *Context,
+) !Step {
+    if (comptime op.AsOperationType() != .Binary) {
+        @compileError("handle_binary_op only handles binary ops");
+    }
+
+    const loop_index = try render_loop(node, block, context);
+
+    const offset = try get_offset(node, loop_index);
+
+    const node_inputs = @field(node.input, @tagName(op));
+
+    const lhs_step = context.node_map.get(node_inputs[0]).?;
+    const lhs = try get_value(
+        node_inputs[0],
+        block,
+        offset,
+        lhs_step,
+        context,
+    );
+
+    const rhs_step = context.node_map.get(node_inputs[1]).?;
+    const rhs = try get_value(
+        node_inputs[1],
+        block,
+        offset,
+        rhs_step,
+        context,
+    );
+
+    const alu_op = switch (op) {
+        .Mul => .Mul,
+        else => unreachable,
+    };
+
+    const output = try block.append(
+        .ALU,
+        if (node.dtype.name.isInt()) .Int else .Float,
+        try block.allocator.dupe(u32, &[_]u32{ lhs, rhs }),
+        alu_op,
+    );
+
+    return output;
+}
+
 fn handle_reduce_op(
     comptime op: ast.Operation,
     node: *const ast.Node,
     block: *ir.IRBlock,
     context: *Context,
 ) !Step {
-    if (op.AsOperationType() != .Reduce) return error.WrongOperation;
+    if (comptime op.AsOperationType() != .Reduce) {
+        @compileError("handle_reduce_op only handles reduce ops");
+    }
 
     const loop_index = try render_loop(node, block, context);
+
+    const default_value = switch (op) {
+        .Sum => 0,
+        else => unreachable,
+    };
 
     const acc = blk: {
         const acc = try block.append(
             .DEFINE_ACC,
             if (node.dtype.name.isInt()) .Int else .Float,
             null,
-            try std.fmt.allocPrint(block.allocator, "{}", .{0}),
+            try std.fmt.allocPrint(block.allocator, "{}", .{default_value}),
         );
 
         break :blk try render_above_scope(block, acc, loop_index, context);
@@ -342,14 +360,21 @@ fn handle_reduce_op(
 
     const offset = try get_offset(node, loop_index);
 
-    const input = context.node_map.get(node.input.Sum[0]).?;
+    const node_input = @field(node.input, @tagName(op))[0];
+    const input = context.node_map.get(@field(node.input, @tagName(op))[0]).?;
+
     const reduce_input = try get_value(
-        node.input.Sum[0],
+        node_input,
         block,
         offset,
         input,
         context,
     );
+
+    const alu_op = switch (op) {
+        .Sum => .Add,
+        else => unreachable,
+    };
 
     const reduced = try block.append(
         .ALU,
@@ -358,7 +383,7 @@ fn handle_reduce_op(
             acc,
             reduce_input,
         }),
-        .Add,
+        alu_op,
     );
 
     const phi = try block.append(
@@ -375,6 +400,7 @@ fn handle_reduce_op(
     return phi;
 }
 
+// TODO: local buffer access
 fn get_value(node: *const ast.Node, block: *ir.IRBlock, offset: Step, input: Step, context: *Context) !Step {
     switch (node.op) {
         .Load => {
@@ -395,6 +421,7 @@ fn get_value(node: *const ast.Node, block: *ir.IRBlock, offset: Step, input: Ste
     }
 }
 
+// TODO: should collapse view changes like permute, etc
 fn get_offset(node: *const ast.Node, loop_index: Step) !Step {
     _ = node;
     return loop_index;

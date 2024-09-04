@@ -74,7 +74,6 @@ pub fn main() !void {
     var scheduler = zensor.Scheduler.init(allocator);
     defer scheduler.deinit();
     try scheduler.register_buffer(load_node, buffer);
-    try scheduler.mark_for_scheduling(mul_node);
     try scheduler.mark_for_scheduling(sum_node);
 
     const schedule = try scheduler.run(sum_node);
