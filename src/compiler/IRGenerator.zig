@@ -342,10 +342,12 @@ fn handle_reduce_op(
     };
 
     const acc = blk: {
+        const loop_index = try render_loop(node, block, context);
+
         const acc = try block.append(
             .DEFINE_ACC,
             if (node.dtype.name.isInt()) .Int else .Float,
-            null,
+            try block.allocator.dupe(Step, &[_]Step{loop_index}),
             try std.fmt.allocPrint(block.allocator, "{}", .{default_value}),
         );
 
@@ -382,12 +384,11 @@ fn handle_reduce_op(
     );
 
     const phi = try block.append(
-        .PHI,
+        .UPDATE,
         if (node.dtype.name.isInt()) .Int else .Float,
         try block.allocator.dupe(u32, &[_]u32{
             acc,
             reduced,
-            loop_index,
         }),
         {},
     );

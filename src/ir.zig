@@ -17,7 +17,7 @@ pub const IROps = enum {
     LOOP,
     LOAD,
     ALU,
-    PHI,
+    UPDATE,
     ENDLOOP,
     STORE,
 
@@ -65,7 +65,7 @@ pub const IROps = enum {
                 try writer.print("ALU.{s}", .{@tagName(self)});
             }
         },
-        PHI: void,
+        UPDATE: void,
         ENDLOOP: void,
         STORE: void,
 

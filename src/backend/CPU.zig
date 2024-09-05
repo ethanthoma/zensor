@@ -92,7 +92,7 @@ fn execute_node(
         .LOOP => try loop(pc, node, context),
         .LOAD => try load(node, context),
         .ALU => try alu(node, context),
-        .PHI => try phi(node, context),
+        .UPDATE => try update(node, context),
         .STORE => try store(node, context),
         else => blk: {
             std.debug.print("\n", .{});
@@ -201,61 +201,49 @@ fn alu(node: ir.IRNode, context: *Context) !u32 {
     return 1;
 }
 
-fn choose(
-    conditional_step: ir.Step,
-    left_branch: ir.Step,
-    right_branch: ir.Step,
-    context: *Context,
-) !ValueContext {
-    const node = context.block.nodes.items[conditional_step];
-
-    switch (node.op) {
-        .LOOP => {
-            const start: u32 = @intFromFloat(context.values.get(node.inputs.?[0]).?.asGeneric());
-            const loop_index: u32 = @intFromFloat(context.values.get(conditional_step).?.asGeneric());
-
-            if (start == loop_index) {
-                std.debug.print("{}", .{});
-                return context.values.get(left_branch).?;
-            }
-
-            return context.values.get(right_branch).?;
-        },
-        else => unreachable,
-    }
-}
-
-// TODO: use this for phi node conditions
-// I thought itd be false for the first iteration but that doesnt make sense
 fn condition(node: ir.IRNode, context: *Context) bool {
     switch (node.op) {
         .LOOP => {
-            const start: u32 = @intFromFloat(context.values.get(node.inputs.?[0]).?.asGeneric());
+            const end: u32 = @intFromFloat(context.values.get(node.inputs.?[1]).?.asGeneric());
             const loop_index: u32 = @intFromFloat(context.values.get(node.step).?.asGeneric());
 
-            return start == loop_index;
+            return loop_index == end;
         },
         else => unreachable,
     }
 }
 
+// Maybe we want to use SSA for the IR?
 fn phi(node: ir.IRNode, context: *Context) !u32 {
-    std.debug.print("\tPHI: choose ", .{});
+    std.debug.print("\tPHI: chose ", .{});
 
-    // always use the result of the ALU operation
-    // idk how it works in other contexts
-    // this whole func needs a rework
-    const new_value = context.values.get(node.inputs.?[1]).?;
+    const cond = condition(context.block.nodes.items[node.inputs.?[2]], context);
 
-    std.debug.print("with value {}\n", .{new_value});
+    const value = if (cond)
+        context.values.get(node.inputs.?[0]).?
+    else
+        context.values.get(node.inputs.?[1]).?;
 
-    // update the accumulator for the next iteration
-    // idk if this makes sense? what if the phi choosing between const?
-    try context.values.put(node.inputs.?[0], new_value);
+    std.debug.print("{s} branch ", .{if (cond) "left" else "right"});
+
+    std.debug.print("with value {}\n", .{value});
 
     // store the value for this PHI node's step
     // pretty sure the whole point of SSA is that I only have to store once...?
-    try context.values.put(node.step, new_value);
+    try context.values.put(node.step, value);
+
+    return 1;
+}
+
+fn update(node: ir.IRNode, context: *Context) !u32 {
+    const value = context.values.get(node.inputs.?[1]).?;
+
+    const step_to_update = node.inputs.?[0];
+    try context.values.put(step_to_update, value);
+
+    try context.values.put(node.step, value);
+
+    std.debug.print("\tUPDATE: value stored in step {} to {}\n", .{ step_to_update, value });
 
     return 1;
 }
