@@ -1,6 +1,8 @@
 const std = @import("std");
 
-const BufferID = @import("./ast.zig").BufferID;
+pub const Step = u32;
+
+// TODO: IR... is redundant
 
 pub const IRDataTypes = enum {
     Pointer,
@@ -95,10 +97,12 @@ pub const IROps = enum {
 pub const IRNode = struct {
     const Self = @This();
 
-    step: u32,
+    step: Step,
     op: IROps,
     dtype: ?IRDataTypes,
-    inputs: ?[]u32,
+    // this is convienient for quick iterations but probably should be changed to
+    // work more like ast.Node does
+    inputs: ?[]Step,
     arg: IROps.Arg,
 
     pub fn format(
@@ -162,20 +166,22 @@ pub const IRBlock = struct {
         self.nodes.deinit();
     }
 
-    pub fn len(self: *const Self) u32 {
-        return @intCast(self.nodes.items.len);
+    pub fn len(self: *const Self) usize {
+        return self.nodes.items.len;
     }
 
-    pub fn append(self: *Self, comptime op: IROps, dtype: ?IRDataTypes, inputs: ?[]u32, arg: std.meta.FieldType(IROps.Arg, op)) !u32 {
+    pub fn append(self: *Self, comptime op: IROps, dtype: ?IRDataTypes, inputs: ?[]Step, arg: std.meta.FieldType(IROps.Arg, op)) !Step {
+        const step: Step = @intCast(self.len());
+
         try self.nodes.append(IRNode{
-            .step = self.len(),
+            .step = step,
             .op = op,
             .dtype = dtype,
             .inputs = inputs,
             .arg = @unionInit(IROps.Arg, @tagName(op), arg),
         });
 
-        return self.len() - 1;
+        return step;
     }
 
     pub fn format(

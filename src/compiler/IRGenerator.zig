@@ -5,8 +5,8 @@ const dtypes = @import("../dtypes.zig");
 const ir = @import("../ir.zig");
 const Scheduler = @import("./Scheduler.zig");
 const Schedule = @import("./Schedule.zig");
+const Step = ir.Step;
 
-const Step = u32;
 const BufferID = usize;
 
 const IRBufferContext = struct {
@@ -48,19 +48,11 @@ const Context = struct {
 
 const Self = @This();
 
-allocator: std.mem.Allocator,
-
-pub fn init(allocator: std.mem.Allocator) Self {
-    return .{
-        .allocator = allocator,
-    };
-}
-
-pub fn run(self: *Self, schedule: *const Schedule) !ir.IRBlock {
-    var context = Context.init(self.allocator);
+pub fn run(allocator: std.mem.Allocator, schedule: *const Schedule) !ir.IRBlock {
+    var context = Context.init(allocator);
     defer context.deinit();
 
-    var block = ir.IRBlock.init(self.allocator);
+    var block = ir.IRBlock.init(allocator);
 
     try define_global_buffers(&block, schedule, &context);
 
@@ -147,7 +139,10 @@ fn process_node(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !v
     }
 }
 
-fn render_above_scope(block: *ir.IRBlock, step: Step, loop_index: Step, context: *Context) !Step {
+fn render_above_scope(block: *ir.IRBlock, step: Step, context: *Context) !Step {
+    const loop_ctx = context.loops.pop();
+    const loop_index = loop_ctx.step;
+
     // remove step from original position
     const step_node = block.nodes.orderedRemove(step);
 
@@ -182,6 +177,12 @@ fn render_above_scope(block: *ir.IRBlock, step: Step, loop_index: Step, context:
             step_ptr.* += 1;
         }
     }
+
+    // update loops
+    try context.loops.append(.{
+        .range = loop_ctx.range,
+        .step = loop_index + 1,
+    });
 
     return loop_index;
 }
@@ -335,8 +336,6 @@ fn handle_reduce_op(
         @compileError("handle_reduce_op only handles reduce ops");
     }
 
-    const loop_index = try render_loop(node, block, context);
-
     const default_value = switch (op) {
         .Sum => 0,
         else => unreachable,
@@ -350,9 +349,10 @@ fn handle_reduce_op(
             try std.fmt.allocPrint(block.allocator, "{}", .{default_value}),
         );
 
-        break :blk try render_above_scope(block, acc, loop_index, context);
+        break :blk try render_above_scope(block, acc, context);
     };
 
+    const loop_index = try render_loop(node, block, context);
     const offset = try get_offset(node, loop_index);
 
     const node_input = @field(node.input, @tagName(op))[0];
@@ -387,7 +387,7 @@ fn handle_reduce_op(
         try block.allocator.dupe(u32, &[_]u32{
             acc,
             reduced,
-            offset,
+            loop_index,
         }),
         {},
     );

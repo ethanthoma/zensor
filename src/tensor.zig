@@ -4,8 +4,9 @@ const ast = @import("./ast.zig");
 const dtypes = @import("./dtypes.zig");
 const view = @import("./view.zig");
 const Scheduler = @import("./compiler/Scheduler.zig");
+const IRGenerator = @import("./compiler/IRGenerator.zig");
 const RuntimeBuffer = @import("./RuntimeBuffer.zig");
-const Device = @import("./backend.zig").Device;
+const CPU = @import("./backend/CPU.zig");
 
 /// Handles Tensor creation.
 /// Maybe there is some abuse of usingnamespace to merge this and the Operations
@@ -135,13 +136,30 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
             };
         }
 
-        /// Adds the node to the scheduler. Should be known at comptime.
-        /// The user should never need to call this.
-        pub fn realize(self: Self, device: Device) !void {
-            try self.scheduler.mark_for_scheduling(node);
-            const schedules = try self.scheduler.run(node);
+        // TODO: some of this schould be cached somehow,
+        // schedules are cached thanks to the dep tree and such
+        // ir gen should be too, codegen phase can probably as well
+        pub fn realize(self: Self) !*RuntimeBuffer {
+            const allocator = self.scheduler.allocator;
 
-            std.debug.print("{s}\n{}\n", .{ @tagName(device), schedules });
+            try self.scheduler.mark_for_scheduling(node);
+            const schedule = try self.scheduler.create_schedule(node);
+            std.debug.print("{}\n", .{schedule});
+
+            var buffer_map = std.AutoHashMap(usize, *RuntimeBuffer).init(allocator);
+            defer buffer_map.deinit();
+
+            for (schedule.global_buffers) |buffer| {
+                try buffer_map.put(buffer.idx, buffer.buffer);
+            }
+
+            const ir_block = try IRGenerator.run(allocator, schedule);
+            std.debug.print("{}\n", .{ir_block});
+
+            // TODO: codegen? does this make sense for zig cpu runtime?
+            try CPU.run(allocator, ir_block, &buffer_map);
+
+            return buffer_map.get(0).?;
         }
 
         fn mul_node(comptime lhs: *const ast.Node, comptime rhs: *const ast.Node) *const ast.Node {
@@ -208,7 +226,7 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
             _ = options;
             _ = fmt;
 
-            try self.realize();
+            const buffer = try self.realize();
 
             try writer.print("Tensor(\n", .{});
 
@@ -222,6 +240,15 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
             try writer.print("],\n", .{});
 
             try writer.print("\tlength: {},\n", .{anyview.size});
+
+            try writer.writeAll("\tdata: [");
+            for (0..self.node.view.size) |i| {
+                const value_buffer = buffer.get(@intCast(i)).?;
+                const value = std.mem.bytesToValue(comptime node.dtype.ToBuiltin(), value_buffer);
+
+                try writer.print("{}, ", .{value});
+            }
+            try writer.writeAll("]\n");
 
             try writer.print(")", .{});
         }

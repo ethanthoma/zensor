@@ -77,7 +77,7 @@ pub fn register_buffer(
     try self.global_buffers.register_buffer(node, buffer);
 }
 
-pub fn run(
+pub fn create_schedule(
     self: *Scheduler,
     comptime root: *const ast.Node,
 ) (Error || std.mem.Allocator.Error)!*const Schedule {
@@ -181,7 +181,7 @@ fn is_dependency(self: *Scheduler, node: *const ast.Node, context: *Context) boo
 }
 
 fn handle_dependency(self: *Scheduler, comptime node: *const ast.Node, context: *Context) !*const ast.Node {
-    const dependency = self.schedules.get(node) orelse try self.run(node);
+    const dependency = self.schedules.get(node) orelse try self.create_schedule(node);
     try context.dependencies.append(dependency);
 
     const store_node = dependency.nodes[dependency.nodes.len - 1];

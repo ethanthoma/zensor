@@ -2,10 +2,12 @@ const std = @import("std");
 
 const dtypes = @import("./dtypes.zig");
 
+/// items are treated as raw byte buffers
+/// this is future proofing for bfloat16 and other custom types
 const RuntimeBuffer = @This();
 
 allocator: std.mem.Allocator,
-ptr: []const u8,
+ptr: []u8,
 len: u32,
 dtype: dtypes.DataType,
 shape: []const u32,
@@ -30,6 +32,22 @@ pub fn init(allocator: std.mem.Allocator, dtype: dtypes.DataType, shape: []const
 pub fn deinit(self: *RuntimeBuffer) void {
     self.allocator.free(self.ptr);
     self.allocator.free(self.shape);
+}
+
+pub fn get(self: *RuntimeBuffer, index: u32) ?[]const u8 {
+    if (index >= self.len) return null;
+
+    const item_size = (self.dtype.bits + 7) / 8;
+
+    return self.ptr[index * item_size .. (index + 1) * item_size];
+}
+
+pub fn set(self: *RuntimeBuffer, index: u32, item: []const u8) void {
+    if (index >= self.len) return;
+
+    const item_size = (self.dtype.bits + 7) / 8;
+
+    @memcpy(self.ptr[index * item_size .. (index + 1) * item_size], item);
 }
 
 pub const Numpy = struct {
@@ -61,6 +79,7 @@ pub const Numpy = struct {
         var fortran_order: bool = false;
         var shape: []u32 = undefined;
 
+        // TODO: clean this up
         var it = std.mem.splitScalar(u8, header, ',');
         while (it.next()) |item| {
             var kv = std.mem.splitScalar(u8, item, ':');
@@ -69,6 +88,7 @@ pub const Numpy = struct {
                 if (std.mem.indexOf(u8, key, "descr") != null) {
                     dtype = std.mem.trim(u8, kv.next() orelse return error.InvalidHeader, " '");
                 } else if (std.mem.indexOf(u8, key, "fortran_order") != null) {
+                    // currently don't use this info...
                     fortran_order = if (std.mem.indexOf(u8, kv.next() orelse return error.InvalidHeader, "True") != null) true else false;
                 } else if (std.mem.indexOf(u8, key, "shape") != null) {
                     const shape_str = std.mem.trim(u8, kv.next() orelse return error.InvalidHeader, " ()");

@@ -9,8 +9,6 @@ pub const Error = error{
     WrongType,
 };
 
-pub usingnamespace @import("cg.zig");
-
 pub var prng = std.Random.DefaultPrng.init(20240807);
 
 pub fn manualSeed(seed: u64) void {

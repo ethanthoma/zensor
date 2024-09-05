@@ -76,12 +76,10 @@ pub fn main() !void {
     try scheduler.register_buffer(load_node, buffer);
     try scheduler.mark_for_scheduling(sum_node);
 
-    const schedule = try scheduler.run(sum_node);
+    const schedule = try scheduler.create_schedule(sum_node);
     std.debug.print("{}\n", .{schedule});
 
     // ** IR generator **
-    var ir_generator = zensor.IRGenerator.init(allocator);
-
-    const ir_block = try ir_generator.run(schedule);
+    const ir_block = try zensor.IRGenerator.run(allocator, schedule);
     std.debug.print("{}\n", .{ir_block});
 }

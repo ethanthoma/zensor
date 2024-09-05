@@ -22,6 +22,5 @@ pub fn main() !void {
 
     const d = try c.sum(0);
 
-    try c.realize(.CPU);
-    try d.realize(.CPU);
+    std.debug.print("{}\n", .{d});
 }
