@@ -1,12 +1,11 @@
 const std = @import("std");
 
-const ast = @import("../ast.zig");
+const ast = @import("ast.zig");
 const dtypes = @import("../dtypes.zig");
 const view = @import("../view.zig");
+const GlobalBuffers = @import("GlobalBuffers.zig");
 const RuntimeBuffer = @import("../RuntimeBuffer.zig");
-
-const Schedule = @import("./Schedule.zig");
-const GlobalBuffers = @import("./GlobalBuffers.zig");
+const Schedule = @import("Schedule.zig");
 
 const Scheduler = @This();
 

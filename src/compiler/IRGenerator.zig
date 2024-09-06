@@ -1,16 +1,15 @@
 const std = @import("std");
 
-const ast = @import("../ast.zig");
+const ast = @import("ast.zig");
 const dtypes = @import("../dtypes.zig");
-const ir = @import("../ir.zig");
-const Scheduler = @import("./Scheduler.zig");
-const Schedule = @import("./Schedule.zig");
-const Step = ir.Step;
+const ir = @import("ir.zig");
+const Schedule = @import("Schedule.zig");
+const Scheduler = @import("Scheduler.zig");
 
 const BufferID = usize;
 
 const IRBufferContext = struct {
-    step: Step,
+    step: ir.Step,
     idx: BufferID,
 };
 
@@ -21,7 +20,7 @@ const Range = struct {
 
 const LoopContext = struct {
     range: Range,
-    step: Step,
+    step: ir.Step,
 };
 
 const Context = struct {
@@ -48,11 +47,11 @@ const Context = struct {
 
 const Self = @This();
 
-pub fn run(allocator: std.mem.Allocator, schedule: *const Schedule) !ir.IRBlock {
+pub fn run(allocator: std.mem.Allocator, schedule: *const Schedule) !ir.Block {
     var context = Context.init(allocator);
     defer context.deinit();
 
-    var block = ir.IRBlock.init(allocator);
+    var block = ir.Block.init(allocator);
 
     try define_global_buffers(&block, schedule, &context);
 
@@ -67,7 +66,7 @@ pub fn run(allocator: std.mem.Allocator, schedule: *const Schedule) !ir.IRBlock 
     return block;
 }
 
-fn define_global_buffers(block: *ir.IRBlock, schedule: *const Schedule, context: *Context) !void {
+fn define_global_buffers(block: *ir.Block, schedule: *const Schedule, context: *Context) !void {
     for (schedule.global_buffers) |buffer_ctx| {
         if (!context.buffers.contains(buffer_ctx.name)) {
             const step = try block.append(
@@ -85,12 +84,12 @@ fn define_global_buffers(block: *ir.IRBlock, schedule: *const Schedule, context:
     }
 }
 
-fn process_node(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !void {
+fn process_node(node: *const ast.Node, block: *ir.Block, context: *Context) !void {
     switch (node.op) {
         .Const => {
             const output = try block.append(
                 .CONST,
-                if (node.dtype.name.isInt()) .Int else .Float,
+                ir_dtype_from_dtype(node.dtype),
                 null,
                 node.arg.Const.value,
             );
@@ -139,7 +138,7 @@ fn process_node(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !v
     }
 }
 
-fn render_above_scope(block: *ir.IRBlock, step: Step, context: *Context) !Step {
+fn render_above_scope(block: *ir.Block, step: ir.Step, context: *Context) !ir.Step {
     const loop_ctx = context.loops.pop();
     const loop_index = loop_ctx.step;
 
@@ -149,7 +148,7 @@ fn render_above_scope(block: *ir.IRBlock, step: Step, context: *Context) !Step {
     // move step to above loop_index
     try block.nodes.insert(loop_index, step_node);
 
-    // update IR node inputs
+    // update  node inputs
     for (block.nodes.items) |*ir_node| {
         if (ir_node.*.step == step) {
             ir_node.*.step = loop_index;
@@ -208,7 +207,7 @@ fn get_range(node: *const ast.Node) Range {
     };
 }
 
-fn render_loop(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !Step {
+fn render_loop(node: *const ast.Node, block: *ir.Block, context: *Context) !ir.Step {
     const range = get_range(node);
 
     // check if in loop
@@ -264,7 +263,7 @@ fn render_loop(node: *const ast.Node, block: *ir.IRBlock, context: *Context) !St
     return loop_index;
 }
 
-fn close_loop(block: *ir.IRBlock, context: *Context) !void {
+fn close_loop(block: *ir.Block, context: *Context) !void {
     if (context.loops.getLastOrNull()) |loop_context| {
         _ = try block.append(
             .ENDLOOP,
@@ -280,9 +279,9 @@ fn close_loop(block: *ir.IRBlock, context: *Context) !void {
 fn handle_binary_op(
     comptime op: ast.Operation,
     node: *const ast.Node,
-    block: *ir.IRBlock,
+    block: *ir.Block,
     context: *Context,
-) !Step {
+) !ir.Step {
     if (comptime op.AsOperationType() != .Binary) {
         @compileError("handle_binary_op only handles binary ops");
     }
@@ -318,7 +317,7 @@ fn handle_binary_op(
 
     const output = try block.append(
         .ALU,
-        if (node.dtype.name.isInt()) .Int else .Float,
+        ir_dtype_from_dtype(node.dtype),
         try block.allocator.dupe(u32, &[_]u32{ lhs, rhs }),
         alu_op,
     );
@@ -329,9 +328,9 @@ fn handle_binary_op(
 fn handle_reduce_op(
     comptime op: ast.Operation,
     node: *const ast.Node,
-    block: *ir.IRBlock,
+    block: *ir.Block,
     context: *Context,
-) !Step {
+) !ir.Step {
     if (comptime op.AsOperationType() != .Reduce) {
         @compileError("handle_reduce_op only handles reduce ops");
     }
@@ -346,8 +345,8 @@ fn handle_reduce_op(
 
         const acc = try block.append(
             .DEFINE_ACC,
-            if (node.dtype.name.isInt()) .Int else .Float,
-            try block.allocator.dupe(Step, &[_]Step{loop_index}),
+            ir_dtype_from_dtype(node.dtype),
+            try block.allocator.dupe(ir.Step, &[_]ir.Step{loop_index}),
             try std.fmt.allocPrint(block.allocator, "{}", .{default_value}),
         );
 
@@ -375,7 +374,7 @@ fn handle_reduce_op(
 
     const reduced = try block.append(
         .ALU,
-        if (node.dtype.name.isInt()) .Int else .Float,
+        ir_dtype_from_dtype(node.dtype),
         try block.allocator.dupe(u32, &[_]u32{
             acc,
             reduce_input,
@@ -383,9 +382,9 @@ fn handle_reduce_op(
         alu_op,
     );
 
-    const phi = try block.append(
+    _ = try block.append(
         .UPDATE,
-        if (node.dtype.name.isInt()) .Int else .Float,
+        ir_dtype_from_dtype(node.dtype),
         try block.allocator.dupe(u32, &[_]u32{
             acc,
             reduced,
@@ -393,18 +392,18 @@ fn handle_reduce_op(
         {},
     );
 
-    return phi;
+    return acc;
 }
 
 // TODO: local buffer access
-fn get_value(node: *const ast.Node, block: *ir.IRBlock, offset: Step, input: Step, context: *Context) !Step {
+fn get_value(node: *const ast.Node, block: *ir.Block, offset: ir.Step, input: ir.Step, context: *Context) !ir.Step {
     switch (node.op) {
         .Load => {
             const buffer = context.buffers.get(node.arg.Load.name).?.step;
 
             const load = try block.append(
                 .LOAD,
-                if (node.dtype.name.isInt()) .Int else .Float,
+                ir_dtype_from_dtype(node.dtype),
                 try block.allocator.dupe(u32, &[_]u32{ buffer, offset }),
                 {},
             );
@@ -418,7 +417,14 @@ fn get_value(node: *const ast.Node, block: *ir.IRBlock, offset: Step, input: Ste
 }
 
 // TODO: should collapse view changes like permute, etc
-fn get_offset(node: *const ast.Node, loop_index: Step) !Step {
+fn get_offset(node: *const ast.Node, loop_index: ir.Step) !ir.Step {
     _ = node;
     return loop_index;
+}
+
+inline fn ir_dtype_from_dtype(dtype: dtypes.DType) ir.DataTypes {
+    return switch (dtype.kind()) {
+        .Int => .Int,
+        .Float => .Float,
+    };
 }

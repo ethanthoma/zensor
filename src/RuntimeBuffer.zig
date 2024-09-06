@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const dtypes = @import("./dtypes.zig");
+const dtypes = @import("dtypes.zig");
 
 /// items are treated as raw byte buffers
 /// this is future proofing for bfloat16 and other custom types
@@ -9,16 +9,20 @@ const RuntimeBuffer = @This();
 allocator: std.mem.Allocator,
 ptr: []u8,
 len: u32,
-dtype: dtypes.DataType,
+dtype: dtypes.DType,
 shape: []const u32,
 
-pub fn init(allocator: std.mem.Allocator, dtype: dtypes.DataType, shape: []const u32) !RuntimeBuffer {
+inline fn item_size(self: RuntimeBuffer) u32 {
+    return (self.dtype.bits() + 7) / 8;
+}
+
+pub fn init(allocator: std.mem.Allocator, dtype: dtypes.DType, shape: []const u32) !RuntimeBuffer {
     var len: u32 = 1;
     for (shape) |dim| {
         len *= dim;
     }
 
-    const size = (len * dtype.bits + 7) / 8;
+    const size = (len * dtype.bits() + 7) / 8;
 
     return .{
         .allocator = allocator,
@@ -37,17 +41,13 @@ pub fn deinit(self: *RuntimeBuffer) void {
 pub fn get(self: *RuntimeBuffer, index: u32) ?[]const u8 {
     if (index >= self.len) return null;
 
-    const item_size = (self.dtype.bits + 7) / 8;
-
-    return self.ptr[index * item_size .. (index + 1) * item_size];
+    return self.ptr[index * self.item_size() .. (index + 1) * self.item_size()];
 }
 
 pub fn set(self: *RuntimeBuffer, index: u32, item: []const u8) void {
     if (index >= self.len) return;
 
-    const item_size = (self.dtype.bits + 7) / 8;
-
-    @memcpy(self.ptr[index * item_size .. (index + 1) * item_size], item);
+    @memcpy(self.ptr[index * self.item_size() .. (index + 1) * self.item_size()], item);
 }
 
 pub const Numpy = struct {
@@ -110,7 +110,7 @@ pub const Numpy = struct {
             size *= dim;
         }
 
-        const data: []u8 = try allocator.alloc(u8, size * datatype.bits / 8);
+        const data: []u8 = try allocator.alloc(u8, size * datatype.bits() / 8);
 
         try reader.readNoEof(data);
 

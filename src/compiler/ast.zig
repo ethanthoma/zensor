@@ -1,8 +1,8 @@
 const std = @import("std");
 const FieldType = std.meta.FieldType;
 
-const dtypes = @import("./dtypes.zig");
-const view = @import("./view.zig");
+const dtypes = @import("../dtypes.zig");
+const view = @import("../view.zig");
 
 pub const OperationType = enum {
     Binary,
@@ -60,7 +60,7 @@ pub const Node = struct {
     arg: Operation.Arg,
     input: Operation.Input,
     view: *const view.AnyView,
-    dtype: dtypes.DataType,
+    dtype: dtypes.DType,
 
     const Self = @This();
 
@@ -69,7 +69,7 @@ pub const Node = struct {
         arg: FieldType(Operation.Arg, op),
         input: FieldType(Operation.Input, op),
         anyview: *const view.AnyView,
-        dtype: dtypes.DataType,
+        dtype: dtypes.DType,
     ) Self {
         return Self{
             .op = op,

@@ -2,7 +2,9 @@
     Zensor, a zig tensor library
 </h3>
 
-Basic tensor library implemented in zig. Correctness first, speed second.
+A zig tensor library. Correctness first, speed second.
+
+This 
 
 **Very WIP**
 

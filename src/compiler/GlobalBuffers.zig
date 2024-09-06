@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ast = @import("../ast.zig");
+const ast = @import("ast.zig");
 const dtypes = @import("../dtypes.zig");
 const RuntimeBuffer = @import("../RuntimeBuffer.zig");
 
@@ -32,7 +32,7 @@ pub fn get_buffer(self: *GlobalBuffers, node: *const ast.Node) !*RuntimeBuffer {
     return self.buffers.get(node) orelse Error.BufferNotAdded;
 }
 
-pub fn create_buffer(self: *GlobalBuffers, dtype: dtypes.DataType, shape: []const u32) !*RuntimeBuffer {
+pub fn create_buffer(self: *GlobalBuffers, dtype: dtypes.DType, shape: []const u32) !*RuntimeBuffer {
     const buffer = try self.allocator.create(RuntimeBuffer);
     errdefer self.allocator.destroy(buffer);
 

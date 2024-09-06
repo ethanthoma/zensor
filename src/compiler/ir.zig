@@ -2,15 +2,13 @@ const std = @import("std");
 
 pub const Step = u32;
 
-// TODO: IR... is redundant
-
-pub const IRDataTypes = enum {
-    Pointer,
+pub const DataTypes = enum {
     Int,
     Float,
+    Pointer,
 };
 
-pub const IROps = enum {
+pub const Ops = enum {
     DEFINE_GLOBAL,
     DEFINE_ACC,
     CONST,
@@ -21,7 +19,7 @@ pub const IROps = enum {
     ENDLOOP,
     STORE,
 
-    pub const Arg = union(IROps) {
+    pub const Arg = union(Ops) {
         const Self = @This();
 
         DEFINE_GLOBAL: struct {
@@ -39,7 +37,6 @@ pub const IROps = enum {
                 _ = fmt;
                 try writer.print("(", .{});
                 try writer.print("{d}, ", .{self.idx});
-                try writer.print("'{s}', ", .{self.name});
                 try writer.print("{any}", .{self.writable});
                 try writer.print(")", .{});
             }
@@ -94,16 +91,16 @@ pub const IROps = enum {
     };
 };
 
-pub const IRNode = struct {
+pub const Node = struct {
     const Self = @This();
 
     step: Step,
-    op: IROps,
-    dtype: ?IRDataTypes,
+    op: Ops,
+    dtype: ?DataTypes,
     // this is convienient for quick iterations but probably should be changed to
     // work more like ast.Node does
     inputs: ?[]Step,
-    arg: IROps.Arg,
+    arg: Ops.Arg,
 
     pub fn format(
         self: Self,
@@ -149,16 +146,16 @@ pub const IRNode = struct {
     }
 };
 
-pub const IRBlock = struct {
+pub const Block = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    nodes: std.ArrayList(IRNode),
+    nodes: std.ArrayList(Node),
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
             .allocator = allocator,
-            .nodes = std.ArrayList(IRNode).init(allocator),
+            .nodes = std.ArrayList(Node).init(allocator),
         };
     }
 
@@ -170,15 +167,15 @@ pub const IRBlock = struct {
         return self.nodes.items.len;
     }
 
-    pub fn append(self: *Self, comptime op: IROps, dtype: ?IRDataTypes, inputs: ?[]Step, arg: std.meta.FieldType(IROps.Arg, op)) !Step {
+    pub fn append(self: *Self, comptime op: Ops, dtype: ?DataTypes, inputs: ?[]Step, arg: std.meta.FieldType(Ops.Arg, op)) !Step {
         const step: Step = @intCast(self.len());
 
-        try self.nodes.append(IRNode{
+        try self.nodes.append(Node{
             .step = step,
             .op = op,
             .dtype = dtype,
             .inputs = inputs,
-            .arg = @unionInit(IROps.Arg, @tagName(op), arg),
+            .arg = @unionInit(Ops.Arg, @tagName(op), arg),
         });
 
         return step;

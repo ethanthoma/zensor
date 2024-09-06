@@ -1,18 +1,51 @@
 const std = @import("std");
 
-const ast = @import("./ast.zig");
-const dtypes = @import("./dtypes.zig");
-const view = @import("./view.zig");
-const Scheduler = @import("./compiler/Scheduler.zig");
-const IRGenerator = @import("./compiler/IRGenerator.zig");
-const RuntimeBuffer = @import("./RuntimeBuffer.zig");
-const CPU = @import("./backend/CPU.zig");
+const compiler = @import("compiler.zig");
+const ast = compiler.ast;
+const Scheduler = compiler.Scheduler;
+const IRGenerator = compiler.IRGenerator;
+
+const dtypes = @import("dtypes.zig");
+const view = @import("view.zig");
+const RuntimeBuffer = @import("RuntimeBuffer.zig");
+
+const CPU = @import("backend/CPU.zig");
 
 /// Handles Tensor creation.
 /// Maybe there is some abuse of usingnamespace to merge this and the Operations
 /// struct below.
-pub fn Tensor(comptime _dtype: dtypes.DataType, comptime _shape: []const u32) type {
-    const anyview = view.View(_shape).init().as_any_view();
+pub fn Tensor(comptime _dtype: dtypes.DType, comptime _shape: anytype) type {
+    const shape: []const u32 = blk: {
+        const fields = std.meta.fields(@TypeOf(_shape));
+        var shape: [fields.len]u32 = undefined;
+
+        inline for (fields, 0..) |field, i| {
+            switch (@typeInfo(field.type)) {
+                .Int, .ComptimeInt => {
+                    const value = @field(_shape, field.name);
+
+                    if (value <= 0) {
+                        @compileError(std.fmt.comptimePrint(
+                            "Shape dims must be greater than 0." ++
+                                "  You passed in {} at index {}",
+                            .{ value, i },
+                        ));
+                    }
+
+                    shape[i] = value;
+                },
+                else => @compileError(std.fmt.comptimePrint(
+                    "Shape dims must be integers." ++
+                        "  You passed in type {} at index {}",
+                    .{ field.type, i },
+                )),
+            }
+        }
+        const final_shape = shape;
+        break :blk &final_shape;
+    };
+
+    const anyview = view.View(shape).init().as_any_view();
 
     return struct {
         fn full_node(comptime value: anytype) *const ast.Node {
@@ -81,7 +114,7 @@ pub fn Tensor(comptime _dtype: dtypes.DataType, comptime _shape: []const u32) ty
 }
 
 const Metadata = struct {
-    dtype: dtypes.DataType,
+    dtype: dtypes.DType,
     anyview: view.AnyView,
     node: *const ast.Node,
 };
@@ -119,7 +152,7 @@ fn binary_verify_shapes(comptime lhs: view.AnyView, comptime rhs: view.AnyView) 
 }
 
 // TODO: API is a little weird, accessing the function becomes A.mul(B) == Opertaions.mul(A, B)
-pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyView, comptime _node: *const ast.Node) type {
+pub fn Operations(comptime _dtype: dtypes.DType, comptime _anyview: view.AnyView, comptime _node: *const ast.Node) type {
     return extern struct {
         const Self = @This();
 
@@ -255,6 +288,37 @@ pub fn Operations(comptime _dtype: dtypes.DataType, comptime _anyview: view.AnyV
     };
 }
 
+fn array_init_shape(comptime tuple: anytype) [std.meta.fields(@TypeOf(tuple)).len]u32 {
+    const fields = std.meta.fields(@TypeOf(tuple));
+
+    var shape: [fields.len]u32 = undefined;
+
+    inline for (fields, 0..) |field, i| {
+        switch (@typeInfo(field.type)) {
+            .Int, .ComptimeInt => {
+                const value = @field(tuple, field.name);
+
+                if (value <= 0) {
+                    @compileError(std.fmt.comptimePrint(
+                        "Shape dims must be greater than 0." ++
+                            "  You passed in {} at index {}",
+                        .{ value, i },
+                    ));
+                }
+
+                shape[i] = value;
+            },
+            else => @compileError(std.fmt.comptimePrint(
+                "Shape dims must be integers." ++
+                    "  You passed in type {} at index {}",
+                .{ field.type, i },
+            )),
+        }
+    }
+
+    return shape;
+}
+
 /// Verifies that the other object in tensor ops are tensor objects.
 /// The ast.Node is known at comptime but I couldn't find a way to abuse pointer
 /// casting to get runtime scheduler and comptime node access to be unified.
@@ -365,7 +429,7 @@ fn verify_tensor(Context: type) void {
         };
 
         if (@hasDecl(Context, "dtype")) {
-            if (@TypeOf(Context.dtype) != dtypes.DataType) {
+            if (@TypeOf(Context.dtype) != dtypes.DType) {
                 errors = errors ++ "\n" ++ error_msgs.invalid_dtype_type;
             }
         } else {
