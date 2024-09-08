@@ -80,6 +80,26 @@ pub const Node = struct {
         };
     }
 
+    const LinkedStr = struct {
+        content: []const u8,
+        previous: ?*const LinkedStr,
+
+        pub fn format(
+            self: @This(),
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) @TypeOf(writer).Error!void {
+            _ = options;
+
+            try writer.writeAll(self.content);
+
+            if (self.previous) |previous| {
+                try writer.print("{" ++ fmt ++ "}", .{previous});
+            }
+        }
+    };
+
     pub fn format(
         self: Self,
         comptime fmt: []const u8,
@@ -95,21 +115,15 @@ pub const Node = struct {
 
         const offset = "\t" ** tab_count;
 
-        const allocator = if (!@inComptime()) blk: {
-            var stack = std.heap.stackFallback(1024, std.heap.page_allocator);
-            break :blk stack.get();
-        } else null;
-
-        try self.format_helper(allocator, writer, 0, false, "", offset);
+        try self.format_helper(writer, 0, false, .{ .content = "", .previous = null }, offset);
     }
 
     fn format_helper(
         self: Self,
-        allocator: ?std.mem.Allocator,
         writer: anytype,
         count: usize,
         is_last: bool,
-        prefix: []const u8,
+        prefix: LinkedStr,
         offset: []const u8,
     ) !void {
         // print prefix
@@ -119,12 +133,10 @@ pub const Node = struct {
             try writer.writeAll(if (is_last) "┗━" else "┣━");
         }
 
-        const new_prefix = if (count == 0) "" else if (is_last) "  " else "│ ";
-
-        const p = try merge_two_str(allocator, prefix, new_prefix);
-        defer p.free();
-
-        const full_prefix = p.merged_strs;
+        const new_prefix = LinkedStr{
+            .content = if (count == 0) "" else if (is_last) "  " else "│ ",
+            .previous = &prefix,
+        };
 
         const fields = comptime std.meta.fields(Operation);
         inline for (fields) |field| blk: {
@@ -164,11 +176,10 @@ pub const Node = struct {
                     for (input, 1..) |child, i| {
                         try writer.writeAll("\n");
                         try child.format_helper(
-                            allocator,
                             writer,
                             count + i,
                             i == input.len,
-                            full_prefix,
+                            new_prefix,
                             offset,
                         );
                     }
@@ -177,29 +188,5 @@ pub const Node = struct {
                 break :blk;
             }
         }
-    }
-
-    const MergedStringResult = struct {
-        allocator: ?std.mem.Allocator,
-        merged_strs: []const u8,
-
-        pub fn free(self: @This()) void {
-            if (self.allocator) |allocator| {
-                allocator.free(self.merged_strs);
-            }
-        }
-    };
-
-    fn merge_two_str(allocator: ?std.mem.Allocator, one: []const u8, two: []const u8) !MergedStringResult {
-        if (allocator) |value| {
-            const merged_strs = try std.fmt.allocPrint(value, "{s}{s}", .{ one, two });
-            return .{ .allocator = value, .merged_strs = merged_strs };
-        }
-        if (@inComptime()) {
-            const merged_strs = std.fmt.comptimePrint("{s}{s}", .{ one, two });
-            return .{ .allocator = null, .merged_strs = merged_strs };
-        }
-
-        @panic("Must be comptime known strings or with a defined allocator");
     }
 };
