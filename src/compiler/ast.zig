@@ -3,6 +3,7 @@ const FieldType = std.meta.FieldType;
 
 const dtypes = @import("../dtypes.zig");
 const view = @import("../view.zig");
+const RuntimeBuffer = @import("../RuntimeBuffer.zig");
 
 pub const OperationType = enum {
     Binary,
@@ -40,18 +41,18 @@ pub const Operation = enum {
 
     pub const Arg = union(Operation) {
         Mul: void,
-        Load: struct { name: []const u8 },
-        Store: struct { name: []const u8 },
+        Load: struct { buffer: *RuntimeBuffer },
+        Store: struct { buffer: *RuntimeBuffer },
         Const: struct { value: []const u8 },
         Sum: struct { dim: u32 },
     };
 
     pub const Input = union(Operation) {
-        Mul: [2]*const Node,
+        Mul: [2]*Node,
         Load: void,
-        Store: [1]*const Node,
+        Store: [1]*Node,
         Const: void,
-        Sum: [1]*const Node,
+        Sum: [1]*Node,
     };
 };
 
@@ -77,6 +78,91 @@ pub const Node = struct {
             .input = @unionInit(Operation.Input, @tagName(op), input),
             .view = anyview,
             .dtype = dtype,
+        };
+    }
+
+    pub fn hash(self: Self) u32 {
+        var hasher = std.hash.Wyhash.init(0);
+        const bytes_dtype = std.mem.asBytes(&@intFromEnum(self.dtype));
+        hasher.update(bytes_dtype);
+
+        const bytes_view = std.mem.asBytes(&self.view);
+        hasher.update(bytes_view);
+
+        const bytes_op = std.mem.asBytes(&@intFromEnum(self.op));
+        hasher.update(bytes_op);
+
+        switch (self.op) {
+            inline else => |op| {
+                const input = @field(self.input, @tagName(op));
+                const arg = @field(self.arg, @tagName(op));
+
+                if (@typeInfo(@TypeOf(input)) == .Array) {
+                    inline for (input) |elem| {
+                        if (@TypeOf(elem) == *const Self) {
+                            const elem_hash = hash(elem.*);
+
+                            const bytes_input = std.mem.asBytes(&elem_hash);
+                            hasher.update(bytes_input);
+                        } else {
+                            std.hash.autoHash(&hasher, elem);
+                        }
+                    }
+                }
+
+                const hash_arg = struct {
+                    fn hash_arg(_hasher: anytype, _arg: anytype) void {
+                        switch (@typeInfo(@TypeOf(_arg))) {
+                            .Struct, .Union => {
+                                inline for (comptime std.meta.fieldNames(@TypeOf(_arg))) |field_name| {
+                                    const field = @field(_arg, field_name);
+                                    hash_arg(_hasher, field);
+                                }
+                            },
+                            .Pointer => |info| {
+                                if (info.size == .Slice) {
+                                    if (info.child == u8) {
+                                        _hasher.update(_arg);
+                                    } else {
+                                        _hasher.update(std.mem.sliceAsBytes(_arg));
+                                    }
+                                } else if (info.size == .One) {
+                                    _hasher.update(std.mem.asBytes(&@intFromPtr(_arg)));
+                                }
+                            },
+                            else => {
+                                std.hash.autoHash(_hasher, _arg);
+                            },
+                        }
+                    }
+                }.hash_arg;
+                hash_arg(&hasher, arg);
+            },
+        }
+
+        const val: u32 = @truncate(hasher.final());
+        return val;
+    }
+
+    pub fn eql(a: Self, b: Self) bool {
+        return @intFromEnum(a.dtype) == @intFromEnum(b.dtype) and
+            a.view == b.view and
+            a.op == b.op and
+            blk: {
+            switch (a.op) {
+                inline else => |op| {
+                    const inputs_a = @field(a.input, @tagName(op));
+                    const inputs_b = @field(b.input, @tagName(op));
+
+                    if (@typeInfo(@TypeOf(inputs_a)) == .Array) {
+                        var same = true;
+                        for (inputs_a, inputs_b) |input_a, input_b| {
+                            same = same and input_a == input_b;
+                        }
+                        break :blk same;
+                    } else break :blk true;
+                },
+            }
         };
     }
 
@@ -155,9 +241,9 @@ pub const Node = struct {
                     },
                     .Buffer => {
                         try writer.print(
-                            "RuntimeBuffer(name={s}, dtype={}, shape={any})",
+                            "RuntimeBuffer(ptr=@{}, dtype={}, shape={any})",
                             .{
-                                arg.name,
+                                @intFromPtr(arg.buffer),
                                 self.dtype,
                                 self.view.shape[0..self.view.rank],
                             },

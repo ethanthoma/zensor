@@ -1,9 +1,9 @@
 const std = @import("std");
 
-const compiler = @import("compiler.zig");
-const ast = compiler.ast;
-const Scheduler = compiler.Scheduler;
-const IRGenerator = compiler.IRGenerator;
+const Compiler = @import("Compiler.zig");
+const ast = Compiler.ast;
+const Scheduler = Compiler.Scheduler;
+const IRGenerator = Compiler.IRGenerator;
 
 const dtypes = @import("dtypes.zig");
 const view = @import("view.zig");
@@ -11,106 +11,232 @@ const RuntimeBuffer = @import("RuntimeBuffer.zig");
 
 const CPU = @import("backend/CPU.zig");
 
-/// Handles Tensor creation.
-/// Maybe there is some abuse of usingnamespace to merge this and the Operations
-/// struct below.
-pub fn Tensor(comptime _dtype: dtypes.DType, comptime _shape: anytype) type {
-    const shape: []const u32 = blk: {
-        const fields = std.meta.fields(@TypeOf(_shape));
-        var shape: [fields.len]u32 = undefined;
-
-        inline for (fields, 0..) |field, i| {
-            switch (@typeInfo(field.type)) {
-                .Int, .ComptimeInt => {
-                    const value = @field(_shape, field.name);
-
-                    if (value <= 0) {
-                        @compileError(std.fmt.comptimePrint(
-                            "Shape dims must be greater than 0." ++
-                                "  You passed in {} at index {}",
-                            .{ value, i },
-                        ));
-                    }
-
-                    shape[i] = value;
-                },
-                else => @compileError(std.fmt.comptimePrint(
-                    "Shape dims must be integers." ++
-                        "  You passed in type {} at index {}",
-                    .{ field.type, i },
-                )),
-            }
-        }
-        const final_shape = shape;
-        break :blk &final_shape;
-    };
-
-    const anyview = view.View(shape).init().as_any_view();
-
+pub fn Tensor(comptime datatype: dtypes.DType, comptime shape: anytype) type {
     return struct {
-        fn full_node(comptime value: anytype) *const ast.Node {
-            comptime {
-                return &ast.Node.init(
-                    .Const,
-                    .{ .value = std.fmt.comptimePrint("{}", .{value}) },
-                    {},
-                    anyview,
-                    _dtype,
-                );
-            }
+        const Self = @This();
+
+        const anyview = view.View(array_init_shape(shape)).init().as_any_view();
+        const dtype = datatype;
+
+        index: Compiler.NodeIndex,
+        compiler: *Compiler,
+
+        pub fn realize(self: Self) !*RuntimeBuffer {
+            self.compiler.mark_for_scheduling(self.index);
+
+            return self.compiler.run(self.index);
         }
 
-        pub fn full(scheduler: *Scheduler, comptime value: anytype) !Operations(
-            _dtype,
-            anyview.*,
-            full_node(value),
+        fn full_node(allocator: std.mem.Allocator, comptime value: anytype) !ast.Node {
+            return ast.Node.init(
+                .Const,
+                .{ .value = try std.fmt.allocPrint(allocator, "{}", .{value}) },
+                {},
+                anyview,
+                dtype,
+            );
+        }
+
+        pub fn full(compiler: *Compiler, comptime value: anytype) !Self {
+            const node = try full_node(compiler.allocator, value);
+            const index = try compiler.node_manager.add(node);
+            return Self{ .index = index, .compiler = compiler };
+        }
+
+        fn load_node(buffer: *RuntimeBuffer) !ast.Node {
+            return ast.Node.init(
+                .Load,
+                .{ .buffer = buffer },
+                {},
+                anyview,
+                dtype,
+            );
+        }
+
+        pub fn from_numpy(compiler: *Compiler, comptime filename: []const u8) !Self {
+            const allocator = compiler.allocator;
+
+            const buffer = try allocator.create(RuntimeBuffer);
+            errdefer allocator.destroy(buffer);
+            buffer.* = try RuntimeBuffer.Numpy.load(allocator, filename);
+
+            const node = try load_node(buffer);
+            const index = try compiler.node_manager.add(node);
+
+            try compiler.register_buffer(index, buffer);
+
+            return Self{ .index = index, .compiler = compiler };
+        }
+
+        fn mul_node(lhs: *ast.Node, rhs: *ast.Node) ast.Node {
+            return ast.Node.init(
+                .Mul,
+                {},
+                .{ lhs, rhs },
+                anyview,
+                dtype,
+            );
+        }
+
+        pub fn mul(self: Self, other: Self) !Self {
+            const lhs = self.compiler.node_manager.get(self.index).?;
+            const rhs = self.compiler.node_manager.get(other.index).?;
+
+            const node = mul_node(lhs, rhs);
+            const index = try self.compiler.node_manager.add(node);
+
+            return Self{ .index = index, .compiler = self.compiler };
+        }
+
+        fn sum_node(self: *ast.Node, comptime dim: u32) ast.Node {
+            return ast.Node.init(
+                .Sum,
+                .{ .dim = dim },
+                .{self},
+                comptime anyview.as_view().reduce(dim).as_any_view(),
+                dtype,
+            );
+        }
+
+        pub fn sum(self: Self, comptime dim: u32) !Tensor(
+            Self.dtype,
+            anyview.as_view().reduce(dim).shape.*,
         ) {
-            return Operations(
-                _dtype,
-                anyview.*,
-                full_node(value),
-            ).init(scheduler);
+            const node = sum_node(
+                self.compiler.node_manager.get(self.index).?,
+                dim,
+            );
+            const index = try self.compiler.node_manager.add(node);
+
+            const reduce_shape = comptime anyview.as_view().reduce(dim).shape.*;
+            return Tensor(Self.dtype, reduce_shape){
+                .index = index,
+                .compiler = self.compiler,
+            };
         }
 
-        fn load_node(comptime name: []const u8) *const ast.Node {
-            comptime {
-                return &ast.Node.init(
-                    .Load,
-                    .{ .name = name },
-                    {},
-                    anyview,
-                    _dtype,
-                );
+        pub fn format(
+            self: Self,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = options;
+            _ = fmt;
+
+            const buffer = try self.compiler.run(self.index);
+
+            try writer.print("Tensor(\n", .{});
+
+            try writer.print("\ttype: {},\n", .{dtype});
+
+            try writer.print("\tshape: [", .{});
+            for (anyview.shape, 0..anyview.rank) |dim, i| {
+                if (i > 0) try writer.print(", ", .{});
+                try writer.print("{}", .{dim});
             }
-        }
+            try writer.print("],\n", .{});
 
-        fn str_to_hex(comptime str: []const u8) []const u8 {
-            comptime {
-                var hex: []const u8 = "";
-                for (str) |char| {
-                    hex = hex ++ std.fmt.comptimePrint("{x}", .{char});
-                }
-                return hex;
+            try writer.print("\tlength: {},\n", .{anyview.size});
+
+            try writer.writeAll("\tdata: [");
+            for (0..anyview.size) |i| {
+                const value_buffer = buffer.get(@intCast(i)).?;
+                const value = std.mem.bytesToValue(dtype.ToBuiltin(), value_buffer);
+                try writer.print("{}, ", .{value});
             }
-        }
+            try writer.writeAll("]\n");
 
-        pub fn from_numpy(scheduler: *Scheduler, comptime filename: []const u8) !Operations(
-            _dtype,
-            anyview.*,
-            load_node(str_to_hex(filename)),
-        ) {
-            const node = comptime load_node(str_to_hex(filename));
-            const buffer = try scheduler.allocator.create(RuntimeBuffer);
-            errdefer scheduler.allocator.destroy(buffer);
-            buffer.* = try RuntimeBuffer.Numpy.load(scheduler.allocator, filename);
-            try scheduler.register_buffer(node, buffer);
-            return Operations(
-                _dtype,
-                anyview.*,
-                node,
-            ).init(scheduler);
+            try writer.print(")", .{});
         }
     };
+}
+
+fn array_init_shape(comptime tuple: anytype) []const u32 {
+    comptime {
+        switch (@typeInfo(@TypeOf(tuple))) {
+            .Struct, .Union, .Enum => {
+                const fields = std.meta.fields(@TypeOf(tuple));
+
+                var shape: [fields.len]u32 = undefined;
+
+                for (fields, 0..) |field, i| {
+                    switch (@typeInfo(field.type)) {
+                        .Int, .ComptimeInt => {
+                            const value = @field(tuple, field.name);
+
+                            if (value <= 0) {
+                                @compileError(std.fmt.comptimePrint(
+                                    "Shape dims must be greater than 0." ++
+                                        "  You passed in {} at index {}",
+                                    .{ value, i },
+                                ));
+                            }
+
+                            shape[i] = value;
+                        },
+                        else => @compileError(std.fmt.comptimePrint(
+                            "Shape dims must be integers." ++
+                                "  You passed in type {} at index {}",
+                            .{ field.type, i },
+                        )),
+                    }
+                }
+
+                const final_shape = shape;
+                return &final_shape;
+            },
+            .Pointer => |info| {
+                if (info.size == .Slice) {
+                    switch (@typeInfo(info.child)) {
+                        .Int, .ComptimeInt => {
+                            var shape: [info.child.len]u32 = undefined;
+
+                            for (tuple, 0..) |elem, i| {
+                                shape[i] = elem;
+                            }
+
+                            const final_shape = shape;
+                            return &final_shape;
+                        },
+                        else => @compileError(std.fmt.comptimePrint(
+                            "Shape dims must be integers." ++
+                                "  You passed in type {}",
+                            .{info.child},
+                        )),
+                    }
+                } else if (info.size == .One) {
+                    return array_init_shape(tuple.*);
+                } else {
+                    @compileError(std.fmt.comptimePrint("Shape dims must be a tuple, slice, or array." ++
+                        "  You passed in type {}", .{@TypeOf(tuple)}));
+                }
+            },
+            .Array => |info| {
+                switch (@typeInfo(info.child)) {
+                    .Int, .ComptimeInt => {
+                        var shape: [info.len]u32 = undefined;
+
+                        for (tuple, 0..) |elem, i| {
+                            shape[i] = elem;
+                        }
+
+                        const final_shape = shape;
+                        return &final_shape;
+                    },
+                    else => @compileError(std.fmt.comptimePrint(
+                        "Shape dims must be integers." ++
+                            "  You passed in type {}",
+                        .{info.child},
+                    )),
+                }
+            },
+            else => {
+                @compileError(std.fmt.comptimePrint("Shape dims must be a tuple, slice, or array." ++
+                    "  You passed in type {}", .{@TypeOf(tuple)}));
+            },
+        }
+    }
 }
 
 const Metadata = struct {
@@ -286,37 +412,6 @@ pub fn Operations(comptime _dtype: dtypes.DType, comptime _anyview: view.AnyView
             try writer.print(")", .{});
         }
     };
-}
-
-fn array_init_shape(comptime tuple: anytype) [std.meta.fields(@TypeOf(tuple)).len]u32 {
-    const fields = std.meta.fields(@TypeOf(tuple));
-
-    var shape: [fields.len]u32 = undefined;
-
-    inline for (fields, 0..) |field, i| {
-        switch (@typeInfo(field.type)) {
-            .Int, .ComptimeInt => {
-                const value = @field(tuple, field.name);
-
-                if (value <= 0) {
-                    @compileError(std.fmt.comptimePrint(
-                        "Shape dims must be greater than 0." ++
-                            "  You passed in {} at index {}",
-                        .{ value, i },
-                    ));
-                }
-
-                shape[i] = value;
-            },
-            else => @compileError(std.fmt.comptimePrint(
-                "Shape dims must be integers." ++
-                    "  You passed in type {} at index {}",
-                .{ field.type, i },
-            )),
-        }
-    }
-
-    return shape;
 }
 
 /// Verifies that the other object in tensor ops are tensor objects.

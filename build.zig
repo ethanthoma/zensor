@@ -60,5 +60,4 @@ const EXAMPLE_NAMES = &.{
     "basic",
     //"benchmark",
     //"bfloat16",
-    "ops",
 };

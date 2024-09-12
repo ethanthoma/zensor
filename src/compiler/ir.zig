@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const RuntimeBuffer = @import("../RuntimeBuffer.zig");
+
 pub const Step = u32;
 
 pub const DataTypes = enum {
@@ -24,7 +26,6 @@ pub const Ops = enum {
 
         DEFINE_GLOBAL: struct {
             idx: u32,
-            name: []const u8,
             writable: bool,
 
             pub fn format(

@@ -8,10 +8,10 @@ const Schedule = @This();
 allocator: std.mem.Allocator,
 nodes: []const *const ast.Node,
 global_buffers: []const BufferContext,
-dependencies: []const *const Schedule,
-schedule_status: ScheduleStatus = .NotRun,
+dependencies: []const *Schedule,
+status: Status = .NotRun,
 
-pub const ScheduleStatus = enum {
+pub const Status = enum {
     NotRun,
     Running,
     Completed,
@@ -21,8 +21,8 @@ pub fn from_slices(
     allocator: std.mem.Allocator,
     nodes: []const *const ast.Node,
     global_buffers: []const BufferContext,
-    dependencies: []const *const Schedule,
-) !*const Schedule {
+    dependencies: []const *Schedule,
+) !*Schedule {
     const self = try allocator.create(@This());
     errdefer allocator.destroy(self);
 
@@ -30,7 +30,7 @@ pub fn from_slices(
         .allocator = allocator,
         .nodes = try allocator.dupe(*const ast.Node, nodes),
         .global_buffers = try allocator.dupe(BufferContext, global_buffers),
-        .dependencies = try allocator.dupe(*const Schedule, dependencies),
+        .dependencies = try allocator.dupe(*Schedule, dependencies),
     };
 
     return self;
@@ -53,7 +53,7 @@ pub fn format(
     _ = fmt;
     try writer.writeAll("Schedule{\n");
 
-    try writer.print("\tstatus: {s}\n", .{@tagName(self.schedule_status)});
+    try writer.print("\tstatus: {s}\n", .{@tagName(self.status)});
 
     try writer.print("\ttopological sort: [{}]ast.Nodes{{", .{self.nodes.len});
     for (self.nodes, 0..) |node, i| {
@@ -65,11 +65,9 @@ pub fn format(
     }
     try writer.writeAll("}, \n");
 
-    try writer.writeAll("\tglobal buffer names: [");
+    try writer.writeAll("\tglobal buffers: [");
     for (self.global_buffers, 0..) |buffer_context, i| {
-        try writer.writeAll("\"");
-        try writer.writeAll(buffer_context.name);
-        try writer.writeAll("\"");
+        try writer.print("({}, {})", .{ buffer_context.idx, buffer_context.writable });
 
         if (i < self.global_buffers.len - 1) {
             try writer.writeAll(", ");
@@ -85,8 +83,7 @@ pub fn format(
 }
 
 pub const BufferContext = struct {
-    name: []const u8,
     idx: usize,
-    buffer: *RuntimeBuffer,
+    ptr: *RuntimeBuffer,
     writable: bool,
 };

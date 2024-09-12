@@ -4,25 +4,9 @@
 
 A zig tensor library. Correctness first, speed second.
 
-This 
+This library promises compile-time type and shape checking.
 
 **Very WIP**
-
-- [x] Basic generic Tensor type for floats and ints
-- [x] Creation functions (ones, zeroes, full)
-- [x] Create fromOwnedSlice
-- [x] Elementwise ops
-- [x] Broadcasting
-- [x] Matmul only for rank 2 tensors
-- [ ] Matmul w/broadcasting
-- [ ] Refactor files for easier management
-- [ ] Save/loading (possible numpy data format integration)
-- [ ] Movement functions (squeeze, stack, permute, expand, etc)
-- [ ] Op functions (max/min, sum, tril)
-- [ ] Casting
-- [ ] Casting
-- [ ] Einsum
-- [ ] Explore lazy ops vs comptime ops graph
 
 ## Example Usage:
 ```zig 
@@ -35,21 +19,20 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var A = try Tensor.full(allocator, .{ 2, 3 }, 4);
-    defer A.deinit();
-    std.debug.print("{}\n", .{A});
+    var compiler = zensor.Compiler.init(allocator);
+    defer compiler.deinit();
 
-    const slice: []const []const T = &.{ &.{ 3, 2, 1 }, &.{ 3, 2, 1 } };
-    var B = try Tensor.fromOwnedSlice(allocator, slice);
-    defer B.deinit();
-    std.debug.print("{}\n", .{B});
+    const filename = "./examples/numpy.npy";
 
-    var C = try A.add(&B);
-    defer C.deinit();
-    std.debug.print("{}\n", .{C});
+    const a = try zensor.Tensor(.Int64, .{3}).from_numpy(&compiler, filename);
 
-    const D = try C.add(3);
-    std.debug.print("{}\n", .{D});
+    const b = try zensor.Tensor(.Int64, .{3}).full(&compiler, 4);
+
+    const c = try a.mul(b);
+
+    const d = try c.sum(0);
+
+    std.debug.print("{}\n", .{d});
 }
 ```
 
@@ -57,44 +40,10 @@ Results in:
 ```
 ❯ zig build run
 Tensor(
-        type: u32,
-        shape: [2, 3],
-        length: 6,
-        data:
-        [
-                [4, 4, 4],
-                [4, 4, 4]
-        ]
-)
-Tensor(
-        type: u32,
-        shape: [2, 3],
-        length: 6,
-        data:
-        [
-                [3, 2, 1],
-                [3, 2, 1]
-        ]
-)
-Tensor(
-        type: u32,
-        shape: [2, 3],
-        length: 6,
-        data:
-        [
-                [7, 6, 5],
-                [7, 6, 5]
-        ]
-)
-Tensor(
-        type: u32,
-        shape: [2, 3],
-        length: 6,
-        data:
-        [
-                [10, 9, 8],
-                [10, 9, 8]
-        ]
+        type: dtypes.Int64,
+        shape: [1],
+        length: 1,
+        data: [56, ]
 )
 ```
 
@@ -129,26 +78,66 @@ If you want to run the tests after cloning the source. Simply run:
 zig build test
 ```
 
-## Performance
+## Design
 
-This is WIP library so perf sucks as that is not the target atm.
-
-However, I did decide to try a somewhat optimized matmul. You can run the example
-via `zig build benchmark -Doptimize=ReleaseFast`. It will yield:
+This library conversts all your tensor operations into an AST:
 ```
-Running benchmark:
-        Tensor Type: f32
-        Tensor matmul: two 512x512 Tensors
-        Number of Trials: 1000
-Validating...
-Starting trials...
-Progress: 1000/1000 (100.0%)
-Total time: 8.239 s for 1000 trials.
-Performance: 32.580 GFLOPS/s
+0 Store RuntimeBuffer(ptr=@140052063859008, dtype=dtypes.Int64, shape={ 3 })
+1 ┗━Mul
+2   ┣━Load RuntimeBuffer(ptr=@140052063858688, dtype=dtypes.Int64, shape={ 3 })
+3   ┗━Const 4
 ```
 
-Which is the performance I get on my AMD Ryzen 7 5700G.
+When you want to execute your operations, it first gets split into schedules:
+```
+Schedule{
+        status: NotRun
+        topological sort: [4]ast.Nodes{Load, Const, Mul, Store},
+        global buffers: [(0, true), (1, false)],
+        dependencies count: 0,
+        AST:
+        0 Store RuntimeBuffer(ptr=@140052063859008, dtype=dtypes.Int64, shape={ 3 })
+        1 ┗━Mul
+        2   ┣━Load RuntimeBuffer(ptr=@140052063858688, dtype=dtypes.Int64, shape={ 3 })
+        3   ┗━Const 4
+}
+```
 
-The implementation is single core and uses random block sizes but does utilize 
-SIMD. GFLOPS is probably super incorrect as I just take the naive 2 * SIZE^3 approach. 
-Good enough for the shot-in-the-dark optimization.
+And then IR code:
+```
+step op name          type             input            arg
+   0 DEFINE_GLOBAL    Pointer          []               (0, true)
+   1 DEFINE_GLOBAL    Pointer          []               (1, false)
+   2 CONST            Int              []               0
+   3 CONST            Int              []               3
+   4 DEFINE_ACC       Int              [5]              0
+   5 LOOP             Int              [2, 3]           None
+   6 LOAD             Int              [1, 5]           None
+   7 ALU              Int              [4, 6]           ALU.Add
+   8 UPDATE           Int              [4, 7]           None
+   9 ENDLOOP                           [5]              None
+  10 CONST            Int              []               0
+  11 STORE                             [0, 10, 4]       None
+```
+
+And finally, executed:
+```
+PC:   0
+PC:   1
+PC:   2 CONST: 0
+PC:   3 CONST: 3
+PC:   4 ACC: 0
+PC:   5 LOOP: from 0 to 3
+PC:   6 LOAD: 4 from buffer 1 at 0
+PC:   7 ALU: Add(0, 4) = 4e0
+PC:   8 UPDATE: value stored in step 4 to 4e0
+PC:   6 LOAD: 16 from buffer 1 at 1
+PC:   7 ALU: Add(4e0, 16) = 2e1
+PC:   8 UPDATE: value stored in step 4 to 2e1
+PC:   6 LOAD: 36 from buffer 1 at 2
+PC:   7 ALU: Add(2e1, 36) = 5.6e1
+PC:   8 UPDATE: value stored in step 4 to 5.6e1
+PC:   9
+PC:  10 CONST: 0
+PC:  11 STORE: 5.6e1 into 0 at 0
+```

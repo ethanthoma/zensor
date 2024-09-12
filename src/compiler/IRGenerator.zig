@@ -3,6 +3,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const dtypes = @import("../dtypes.zig");
 const ir = @import("ir.zig");
+const RuntimeBuffer = @import("../RuntimeBuffer.zig");
 const Schedule = @import("Schedule.zig");
 const Scheduler = @import("Scheduler.zig");
 
@@ -26,14 +27,14 @@ const LoopContext = struct {
 const Context = struct {
     allocator: std.mem.Allocator,
     node_map: std.AutoHashMap(*const ast.Node, u32),
-    buffers: std.StringHashMap(IRBufferContext),
+    buffers: std.AutoHashMap(*RuntimeBuffer, IRBufferContext),
     loops: std.ArrayList(LoopContext),
 
     pub fn init(allocator: std.mem.Allocator) Context {
         return .{
             .allocator = allocator,
             .node_map = std.AutoHashMap(*const ast.Node, u32).init(allocator),
-            .buffers = std.StringHashMap(IRBufferContext).init(allocator),
+            .buffers = std.AutoHashMap(*RuntimeBuffer, IRBufferContext).init(allocator),
             .loops = std.ArrayList(LoopContext).init(allocator),
         };
     }
@@ -68,19 +69,16 @@ pub fn run(allocator: std.mem.Allocator, schedule: *const Schedule) !ir.Block {
 
 fn define_global_buffers(block: *ir.Block, schedule: *const Schedule, context: *Context) !void {
     for (schedule.global_buffers) |buffer_ctx| {
-        if (!context.buffers.contains(buffer_ctx.name)) {
-            const step = try block.append(
-                .DEFINE_GLOBAL,
-                .Pointer,
-                null,
-                .{
-                    .idx = @intCast(buffer_ctx.idx),
-                    .name = buffer_ctx.name,
-                    .writable = buffer_ctx.writable,
-                },
-            );
-            try context.buffers.put(buffer_ctx.name, .{ .idx = buffer_ctx.idx, .step = step });
-        }
+        const step = try block.append(
+            .DEFINE_GLOBAL,
+            .Pointer,
+            null,
+            .{
+                .idx = @intCast(buffer_ctx.idx),
+                .writable = buffer_ctx.writable,
+            },
+        );
+        try context.buffers.put(buffer_ctx.ptr, .{ .idx = buffer_ctx.idx, .step = step });
     }
 }
 
@@ -97,7 +95,7 @@ fn process_node(node: *const ast.Node, block: *ir.Block, context: *Context) !voi
             try context.node_map.put(node, output);
         },
         .Load => {
-            const output = context.buffers.get(node.arg.Load.name).?.step;
+            const output = context.buffers.get(node.arg.Load.buffer).?.step;
             try context.node_map.put(node, output);
         },
         .Mul => {
@@ -106,7 +104,7 @@ fn process_node(node: *const ast.Node, block: *ir.Block, context: *Context) !voi
         },
         .Store => {
             const loop_index = try render_loop(node, block, context);
-            const buffer = context.buffers.get(node.arg.Store.name).?.step;
+            const buffer = context.buffers.get(node.arg.Store.buffer).?.step;
             const offset = try get_offset(node, loop_index);
 
             const input = context.node_map.get(node.input.Store[0]).?;
@@ -399,7 +397,7 @@ fn handle_reduce_op(
 fn get_value(node: *const ast.Node, block: *ir.Block, offset: ir.Step, input: ir.Step, context: *Context) !ir.Step {
     switch (node.op) {
         .Load => {
-            const buffer = context.buffers.get(node.arg.Load.name).?.step;
+            const buffer = context.buffers.get(node.arg.Load.buffer).?.step;
 
             const load = try block.append(
                 .LOAD,

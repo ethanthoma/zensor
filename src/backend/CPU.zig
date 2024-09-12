@@ -1,10 +1,12 @@
 const std = @import("std");
 
-const compiler = @import("../compiler.zig");
+const compiler = @import("../Compiler.zig");
 const ir = compiler.ir;
 
 const RuntimeBuffer = @import("../RuntimeBuffer.zig");
 const dtypes = @import("../dtypes.zig");
+
+const LogBuffer = @import("./LogBuffer.zig");
 
 /// this code is ugly and makes a lot of assumptions
 /// a pretty ugly emulator running  code directly
@@ -17,6 +19,7 @@ const Context = struct {
     block: ir.Block,
     buffer_map: *std.AutoHashMap(usize, *RuntimeBuffer),
     values: std.AutoHashMap(ir.Step, ValueContext),
+    log_buffer: LogBuffer,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -28,6 +31,7 @@ const Context = struct {
             .block = block,
             .buffer_map = buffer_map,
             .values = std.AutoHashMap(ir.Step, ValueContext).init(allocator),
+            .log_buffer = LogBuffer.init(allocator),
         };
     }
 
@@ -68,7 +72,7 @@ const ValueContext = union(ir.DataTypes) {
     }
 };
 
-pub fn run(allocator: std.mem.Allocator, block: ir.Block, buffer_map: *std.AutoHashMap(usize, *RuntimeBuffer)) !void {
+pub fn run(allocator: std.mem.Allocator, block: ir.Block, buffer_map: *std.AutoHashMap(usize, *RuntimeBuffer)) !LogBuffer {
     var context = Context.init(allocator, block, buffer_map);
     defer context.deinit();
 
@@ -76,13 +80,15 @@ pub fn run(allocator: std.mem.Allocator, block: ir.Block, buffer_map: *std.AutoH
     while (pc < block.len()) {
         pc += try execute_node(pc, &context);
     }
+
+    return context.log_buffer;
 }
 
 fn execute_node(
     pc: u32,
     context: *Context,
 ) Error!u32 {
-    std.debug.print("PC: {d: >3}", .{pc});
+    try context.log_buffer.log("PC: {d: >3}", .{pc});
     const node = context.block.nodes.items[pc];
 
     const pc_offset = switch (node.op) {
@@ -94,7 +100,7 @@ fn execute_node(
         .UPDATE => try update(node, context),
         .STORE => try store(node, context),
         else => blk: {
-            std.debug.print("\n", .{});
+            try context.log_buffer.log("\n", .{});
             break :blk 1;
         },
     };
@@ -109,7 +115,7 @@ fn define_acc(node: ir.Node, context: *Context) !u32 {
     };
     try context.values.put(node.step, value_ctx);
 
-    std.debug.print("\tACC: {}\n", .{value_ctx});
+    try context.log_buffer.log("\tACC: {}\n", .{value_ctx});
 
     return 1;
 }
@@ -122,7 +128,7 @@ fn define_const(node: ir.Node, context: *Context) !u32 {
     };
     try context.values.put(node.step, value_ctx);
 
-    std.debug.print("\tCONST: {}\n", .{value_ctx});
+    try context.log_buffer.log("\tCONST: {}\n", .{value_ctx});
 
     return 1;
 }
@@ -137,7 +143,7 @@ fn loop(pc: u32, node: ir.Node, context: *Context) Error!u32 {
 
     var loop_index = start;
 
-    std.debug.print("\tLOOP: from {d} to {d}\n", .{ start, end });
+    try context.log_buffer.log("\tLOOP: from {d} to {d}\n", .{ start, end });
 
     var offset: u32 = 0;
     while (loop_index < end) : (loop_index += 1) {
@@ -171,7 +177,7 @@ fn load(node: ir.Node, context: *Context) !u32 {
         else => unreachable,
     };
 
-    std.debug.print("\tLOAD: {} from buffer {} at {}\n", .{ value_ctx, buffer_idx, index });
+    try context.log_buffer.log("\tLOAD: {} from buffer {} at {}\n", .{ value_ctx, buffer_idx, index });
 
     try context.values.put(node.step, value_ctx);
 
@@ -191,7 +197,7 @@ fn alu(node: ir.Node, context: *Context) !u32 {
 
     try context.values.put(node.step, result);
 
-    std.debug.print("\tALU: {s}({}, {}) = {}\n", .{
+    try context.log_buffer.log("\tALU: {s}({}, {}) = {}\n", .{
         @tagName(node.arg.ALU),
         context.values.get(node.inputs.?[0]).?,
         context.values.get(node.inputs.?[1]).?,
@@ -215,7 +221,7 @@ fn condition(node: ir.Node, context: *Context) bool {
 
 // Maybe we want to use SSA for the IR?
 fn phi(node: ir.Node, context: *Context) !u32 {
-    std.debug.print("\tPHI: chose ", .{});
+    try context.log_buffer.log("\tPHI: chose ", .{});
 
     const cond = condition(context.block.nodes.items[node.inputs.?[2]], context);
 
@@ -224,9 +230,9 @@ fn phi(node: ir.Node, context: *Context) !u32 {
     else
         context.values.get(node.inputs.?[1]).?;
 
-    std.debug.print("{s} branch ", .{if (cond) "left" else "right"});
+    try context.log_buffer.log("{s} branch ", .{if (cond) "left" else "right"});
 
-    std.debug.print("with value {}\n", .{value});
+    try context.log_buffer.log("with value {}\n", .{value});
 
     // store the value for this PHI node's step
     // pretty sure the whole point of SSA is that I only have to store once...?
@@ -241,7 +247,7 @@ fn update(node: ir.Node, context: *Context) !u32 {
     const step_to_update = node.inputs.?[0];
     try context.values.put(step_to_update, value);
 
-    std.debug.print("\tUPDATE: value stored in step {} to {}\n", .{ step_to_update, value });
+    try context.log_buffer.log("\tUPDATE: value stored in step {} to {}\n", .{ step_to_update, value });
 
     return 1;
 }
@@ -254,7 +260,7 @@ fn store(node: ir.Node, context: *Context) !u32 {
 
     const value = context.values.get(node.inputs.?[2]).?.asGeneric();
 
-    std.debug.print("\tSTORE: {} into {} at {}\n", .{
+    try context.log_buffer.log("\tSTORE: {} into {} at {}\n", .{
         context.values.get(node.inputs.?[2]).?,
         buffer_idx,
         index,
