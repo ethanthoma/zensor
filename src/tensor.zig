@@ -68,48 +68,58 @@ pub fn Tensor(comptime datatype: dtypes.DType, comptime shape: anytype) type {
             return Self{ .index = index, .compiler = compiler };
         }
 
-        fn mul_node(lhs: *ast.Node, rhs: *ast.Node) ast.Node {
-            return ast.Node.init(
-                .Mul,
-                {},
-                .{ lhs, rhs },
-                anyview,
-                dtype,
-            );
-        }
-
         pub fn mul(self: Self, other: Self) !Self {
-            const lhs = self.compiler.node_manager.get(self.index).?;
-            const rhs = self.compiler.node_manager.get(other.index).?;
-
-            const node = mul_node(lhs, rhs);
-            const index = try self.compiler.node_manager.add(node);
-
-            return Self{ .index = index, .compiler = self.compiler };
-        }
-
-        fn sum_node(self: *ast.Node, comptime dim: u32) ast.Node {
-            return ast.Node.init(
-                .Sum,
-                .{ .dim = dim },
-                .{self},
-                comptime anyview.as_view().reduce(dim).as_any_view(),
-                dtype,
-            );
+            return binary_op(.Mul, self, other);
         }
 
         pub fn sum(self: Self, comptime dim: u32) !Tensor(
             Self.dtype,
-            anyview.as_view().reduce(dim).shape.*,
+            anyview.as_view().reduce(dim).shape,
         ) {
-            const node = sum_node(
-                self.compiler.node_manager.get(self.index).?,
-                dim,
+            return reduce_op(.Sum, self, dim);
+        }
+
+        fn binary_op(comptime op: ast.Operation, lhs: Self, rhs: Self) !Self {
+            if (comptime op.AsOperationType() != .Binary) {
+                @compileError(std.fmt.comptimePrint("Expected binary op, got {}", .{op.AsOperationType()}));
+            }
+
+            const node_lhs = lhs.compiler.node_manager.get(lhs.index).?;
+            const node_rhs = rhs.compiler.node_manager.get(rhs.index).?;
+
+            const node = ast.Node.init(
+                op,
+                {},
+                .{ node_lhs, node_rhs },
+                anyview,
+                dtype,
             );
+            const index = try lhs.compiler.node_manager.add(node);
+
+            return Self{ .index = index, .compiler = lhs.compiler };
+        }
+
+        fn reduce_op(comptime op: ast.Operation, self: Self, comptime dim: u32) !Tensor(
+            Self.dtype,
+            anyview.as_view().reduce(dim).shape,
+        ) {
+            if (comptime op.AsOperationType() != .Reduce) {
+                @compileError(std.fmt.comptimePrint("Expected reduce op, got {}", .{op.AsOperationType()}));
+            }
+
+            const reduce_view = comptime anyview.as_view().reduce(dim);
+
+            const node = ast.Node.init(
+                op,
+                .{ .dim = dim },
+                .{self.compiler.node_manager.get(self.index).?},
+                comptime reduce_view.as_any_view(),
+                dtype,
+            );
+
             const index = try self.compiler.node_manager.add(node);
 
-            const reduce_shape = comptime anyview.as_view().reduce(dim).shape.*;
-            return Tensor(Self.dtype, reduce_shape){
+            return Tensor(Self.dtype, reduce_view.shape){
                 .index = index,
                 .compiler = self.compiler,
             };
@@ -152,6 +162,7 @@ pub fn Tensor(comptime datatype: dtypes.DType, comptime shape: anytype) type {
     };
 }
 
+/// creates a shape array []const u32 from another slice, array, pointer to array, or tuple
 fn array_init_shape(comptime tuple: anytype) []const u32 {
     comptime {
         switch (@typeInfo(@TypeOf(tuple))) {
@@ -275,143 +286,6 @@ fn binary_verify_shapes(comptime lhs: view.AnyView, comptime rhs: view.AnyView) 
             }
         }
     }
-}
-
-// TODO: API is a little weird, accessing the function becomes A.mul(B) == Opertaions.mul(A, B)
-pub fn Operations(comptime _dtype: dtypes.DType, comptime _anyview: view.AnyView, comptime _node: *const ast.Node) type {
-    return extern struct {
-        const Self = @This();
-
-        const dtype = _dtype;
-        const anyview = _anyview;
-        pub const node = _node;
-
-        scheduler: *Scheduler,
-        node: *const ast.Node = node,
-
-        pub fn init(scheduler: *Scheduler) Self {
-            return Self{
-                .scheduler = scheduler,
-            };
-        }
-
-        // TODO: some of this schould be cached somehow,
-        // schedules are cached thanks to the dep tree and such
-        // ir gen should be too, codegen phase can probably as well
-        pub fn realize(self: Self) !*RuntimeBuffer {
-            const allocator = self.scheduler.allocator;
-
-            try self.scheduler.mark_for_scheduling(node);
-            const schedule = try self.scheduler.create_schedule(node);
-            std.debug.print("{}\n", .{schedule});
-
-            var buffer_map = std.AutoHashMap(usize, *RuntimeBuffer).init(allocator);
-            defer buffer_map.deinit();
-
-            for (schedule.global_buffers) |buffer| {
-                try buffer_map.put(buffer.idx, buffer.buffer);
-            }
-
-            const ir_block = try IRGenerator.run(allocator, schedule);
-            std.debug.print("{}\n", .{ir_block});
-
-            // TODO: codegen? does this make sense for zig cpu runtime?
-            try CPU.run(allocator, ir_block, &buffer_map);
-
-            return buffer_map.get(0).?;
-        }
-
-        fn mul_node(comptime lhs: *const ast.Node, comptime rhs: *const ast.Node) *const ast.Node {
-            comptime {
-                return &ast.Node.init(
-                    .Mul,
-                    {},
-                    .{ lhs, rhs },
-                    &anyview,
-                    dtype,
-                );
-            }
-        }
-
-        pub fn mul(self: Self, other: anytype) !Operations(
-            dtype,
-            anyview,
-            mul_node(@TypeOf(self).node, to_meta_data(@TypeOf(other)).node),
-        ) {
-            binary_verify_shapes(anyview, to_meta_data(@TypeOf(other)).anyview);
-
-            const self_node = node;
-            const other_node = comptime to_meta_data(@TypeOf(other)).node;
-            const n = comptime mul_node(self_node, other_node);
-            return Operations(dtype, anyview, n).init(self.scheduler);
-        }
-
-        fn sum_node(
-            comptime self: *const ast.Node,
-            comptime dim: u32,
-        ) *const ast.Node {
-            comptime {
-                return &ast.Node.init(
-                    .Sum,
-                    .{
-                        .dim = dim,
-                    },
-                    .{self},
-                    anyview.as_view().reduce(dim).as_any_view(),
-                    dtype,
-                );
-            }
-        }
-
-        pub fn sum(self: Self, comptime dim: u32) !Operations(
-            dtype,
-            anyview.as_view().reduce(dim).as_any_view().*,
-            sum_node(@TypeOf(self).node, dim),
-        ) {
-            const n = comptime sum_node(node, dim);
-            return Operations(
-                dtype,
-                anyview.as_view().reduce(dim).as_any_view().*,
-                n,
-            ).init(self.scheduler);
-        }
-
-        pub fn format(
-            self: Self,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = options;
-            _ = fmt;
-
-            const buffer = try self.realize();
-
-            try writer.print("Tensor(\n", .{});
-
-            try writer.print("\ttype: {},\n", .{dtype});
-
-            try writer.print("\tshape: [", .{});
-            for (anyview.shape, 0..anyview.rank) |dim, i| {
-                if (i > 0) try writer.print(", ", .{});
-                try writer.print("{}", .{dim});
-            }
-            try writer.print("],\n", .{});
-
-            try writer.print("\tlength: {},\n", .{anyview.size});
-
-            try writer.writeAll("\tdata: [");
-            for (0..self.node.view.size) |i| {
-                const value_buffer = buffer.get(@intCast(i)).?;
-                const value = std.mem.bytesToValue(comptime node.dtype.ToBuiltin(), value_buffer);
-
-                try writer.print("{}, ", .{value});
-            }
-            try writer.writeAll("]\n");
-
-            try writer.print(")", .{});
-        }
-    };
 }
 
 /// Verifies that the other object in tensor ops are tensor objects.
