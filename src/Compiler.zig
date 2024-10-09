@@ -147,7 +147,7 @@ pub fn run(self: *Compiler, index: NodeIndex) !*RuntimeBuffer {
 
                 const code = try x86_64.generate_kernel(self.allocator, &ir_block);
 
-                std.debug.print("{x:0>2}", .{code});
+                std.debug.print("{x:0>2}\n", .{code});
 
                 const mmap = try jit.Code.init(code);
                 mmap.run(buffer_map.items.ptr);
