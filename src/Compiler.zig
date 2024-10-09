@@ -8,6 +8,8 @@ pub const Scheduler = @import("./compiler/Scheduler.zig");
 const RuntimeBuffer = @import("./RuntimeBuffer.zig");
 
 const CPU = @import("backend/CPU.zig");
+const x86_64 = @import("backend/x86_64.zig");
+const jit = @import("backend/jit.zig");
 
 pub const Error = error{
     BufferNotAdded,
@@ -136,17 +138,21 @@ pub fn run(self: *Compiler, index: NodeIndex) !*RuntimeBuffer {
                 const ir_block = try IRGenerator.run(self.allocator, schedule);
                 std.log.debug("\n{}", .{ir_block});
 
-                var buffer_map = std.AutoHashMap(usize, *RuntimeBuffer).init(self.allocator);
+                var buffer_map = std.ArrayList([*]u8).init(self.allocator);
                 defer buffer_map.deinit();
 
                 for (schedule.global_buffers) |buffer| {
-                    try buffer_map.put(buffer.idx, buffer.ptr);
+                    try buffer_map.append(buffer.ptr.ptr.ptr);
                 }
 
-                const logs = try CPU.run(self.allocator, ir_block, &buffer_map);
-                try logs.dump();
+                const code = try x86_64.generate_kernel(self.allocator, &ir_block);
 
-                result = buffer_map.get(0).?;
+                std.debug.print("{x:0>2}", .{code});
+
+                const mmap = try jit.Code.init(code);
+                mmap.run(buffer_map.items.ptr);
+
+                result = schedule.global_buffers[0].ptr;
 
                 schedule.status = .Completed;
             },

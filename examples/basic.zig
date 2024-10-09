@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zensor = @import("zensor");
 
-pub const std_options = std.Options{ .log_level = .info };
+pub const std_options = std.Options{ .log_level = .debug };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
