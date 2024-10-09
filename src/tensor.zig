@@ -9,8 +9,6 @@ const dtypes = @import("dtypes.zig");
 const view = @import("view.zig");
 const RuntimeBuffer = @import("RuntimeBuffer.zig");
 
-const CPU = @import("backend/CPU.zig");
-
 pub fn Tensor(comptime datatype: dtypes.DType, comptime shape: anytype) type {
     return struct {
         const Self = @This();

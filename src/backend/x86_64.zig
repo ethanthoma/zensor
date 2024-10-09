@@ -107,7 +107,7 @@ const Register = blk: {
     });
 };
 
-fn rex_prefix(dest: Register, source: Register, reg: ?Register) ?u8 {
+fn rex_prefix(dest: Register, source: ?Register, reg: ?Register) ?u8 {
     var rex: u8 = 0b01000000;
 
     // 64 bit registers
@@ -117,8 +117,10 @@ fn rex_prefix(dest: Register, source: Register, reg: ?Register) ?u8 {
         rex |= 0b00000100;
     }
 
-    if (is_extended(source)) {
-        rex |= 0b00000001;
+    if (source) |src| {
+        if (is_extended(src)) {
+            rex |= 0b00000001;
+        }
     }
 
     if (reg) |offset| {
@@ -158,11 +160,28 @@ fn reg_encoding(reg: Register) u3 {
     };
 }
 
-fn modrm(dest: Register, source: Register, offset: bool) u8 {
-    const mod: u8 = switch (offset) {
-        true => 0b10,
-        false => 0b00,
-    };
+const ModRMOptions = union(enum) {
+    displacement: enum {
+        None,
+        Byte,
+        Word,
+    },
+    register: void,
+
+    pub fn value(self: ModRMOptions) u2 {
+        return switch (self) {
+            .displacement => |displacement| switch (displacement) {
+                .None => 0b00,
+                .Byte => 0b01,
+                .Word => 0b10,
+            },
+            .register => 0b11,
+        };
+    }
+};
+
+fn modrm(dest: Register, source: Register, options: ModRMOptions) u8 {
+    const mod: u8 = options.value();
 
     const reg: u8 = reg_encoding(dest);
 
@@ -171,10 +190,44 @@ fn modrm(dest: Register, source: Register, offset: bool) u8 {
     return mod << 6 | reg << 3 | rm;
 }
 
+fn CircularBuffer(comptime T: type) type {
+    if (@typeInfo(T) != .Enum) @compileError("must be enum");
+
+    const size = std.meta.fields(T).len;
+
+    return struct {
+        const Self = @This();
+
+        buffer: [size]T,
+        head: usize,
+
+        pub fn init() Self {
+            var self = Self{
+                .buffer = undefined,
+                .head = 0,
+            };
+
+            for (std.meta.tags(T), 0..) |tag, idx| {
+                self.buffer[idx] = tag;
+            }
+
+            return self;
+        }
+
+        pub fn read(self: *Self) T {
+            const elem = self.buffer[self.head];
+
+            self.head = (self.head + 1) % size;
+
+            return elem;
+        }
+    };
+}
+
 const ValueStore = struct {
     map: std.AutoHashMap(ir.Step, Location),
     static_list: std.ArrayList(StaticRegister),
-    temp_list: std.ArrayList(TempRegister),
+    temp_queue: CircularBuffer(TempRegister),
     temp_steps: std.AutoHashMap(TempRegister, ir.Step),
     consts: std.AutoHashMap(ir.Step, []const u8),
     allocator: mem.Allocator,
@@ -185,7 +238,7 @@ const ValueStore = struct {
         var value_store = ValueStore{
             .map = std.AutoHashMap(ir.Step, Location).init(allocator),
             .static_list = std.ArrayList(StaticRegister).init(allocator),
-            .temp_list = std.ArrayList(TempRegister).init(allocator),
+            .temp_queue = CircularBuffer(TempRegister).init(),
             .temp_steps = std.AutoHashMap(TempRegister, ir.Step).init(allocator),
             .consts = std.AutoHashMap(ir.Step, []const u8).init(allocator),
             .allocator = allocator,
@@ -193,7 +246,6 @@ const ValueStore = struct {
         };
 
         try value_store.static_list.appendSlice(std.meta.tags(StaticRegister));
-        try value_store.temp_list.appendSlice(std.meta.tags(TempRegister));
 
         return value_store;
     }
@@ -237,20 +289,18 @@ const ValueStore = struct {
     // use for temp vars
     // value should be in little endian
     pub fn write_value_temp(self: *ValueStore, step: ir.Step, value: [4]u8) !void {
-        const reg = self.temp_list.pop();
+        const reg = self.temp_queue.read();
 
         if (self.temp_steps.get(reg)) |prev| {
-            self.temp_steps.remove(reg);
-            self.map.remove(prev);
+            _ = self.temp_steps.remove(reg);
+            _ = self.map.remove(prev);
         }
 
         const loc = Location{ .Temp = reg };
 
-        try write_value_to_reg(reg.toGeneric(), value, self.writer);
+        try write_value_to_reg(reg.to_generic(), value, self.writer);
 
         try self.map.put(step, loc);
-
-        try self.temp_list.append(reg);
     }
 
     fn write_value_to_reg(reg: Register, value: [4]u8, writer: anytype) !void {
@@ -308,7 +358,7 @@ const ValueStore = struct {
     // loads 4 bytes from a buffer
     // stores value in a temporary register
     pub fn load_from_buffer(self: *ValueStore, step: ir.Step, buffer_idx: usize, index: ir.Step) !void {
-        const reg = self.temp_list.pop();
+        const reg = self.temp_queue.read();
 
         const offset: usize = buffer_idx * 8;
         const bytes = std.mem.toBytes(offset)[0..4];
@@ -331,7 +381,6 @@ const ValueStore = struct {
 
         try self.map.put(step, loc);
 
-        try self.temp_list.append(reg);
         try self.temp_steps.put(reg, step);
     }
 
@@ -345,7 +394,7 @@ const ValueStore = struct {
         // op code
         try writer.writeByte(0x8b);
 
-        try writer.writeByte(modrm(dest, source, true));
+        try writer.writeByte(modrm(dest, source, .{ .displacement = .Word }));
 
         // SIB byte for [RSP] with no index
         // TODO: refuse to believe this is correct
@@ -357,7 +406,7 @@ const ValueStore = struct {
     }
 
     fn load_value_from_register_register_offset(dest: Register, source: Register, offset: Register, writer: anytype) !void {
-        std.log.debug("mov {s}, qword ptr [{s} + {s}]", .{ @tagName(dest), @tagName(source), @tagName(offset) });
+        std.log.debug("mov {s}, qword ptr [{s} + {s} * 8]", .{ @tagName(dest), @tagName(source), @tagName(offset) });
 
         if (rex_prefix(dest, source, null)) |prefix| {
             try writer.writeByte(prefix);
@@ -371,7 +420,7 @@ const ValueStore = struct {
         try writer.writeByte(modrm_sib);
 
         // SIB byte: Scale = 0b00 (multiply index by 0), Index = offset, Base = source
-        const sib: u8 = (0b00 << 6) | (@as(u8, @intCast(reg_encoding(offset))) << 3) | reg_encoding(source);
+        const sib: u8 = (0b11 << 6) | (@as(u8, @intCast(reg_encoding(offset))) << 3) | reg_encoding(source);
         try writer.writeByte(sib);
     }
 
@@ -523,7 +572,7 @@ const ValueStore = struct {
 
         _ = writer;
 
-        std.log.debug("{x}", .{modrm(dest, source, true)});
+        std.log.debug("{x}", .{modrm(dest, source, .{ .displacement = .Byte })});
     }
 
     fn cmp_register_with_const(reg: Register, value: [4]u8, writer: anytype) !void {
@@ -553,6 +602,134 @@ const ValueStore = struct {
         }
 
         try writer.writeAll(&value);
+    }
+
+    pub fn alu(self: *ValueStore, step: ir.Step, op: std.meta.fieldInfo(ir.Ops.Arg, .ALU).type, lhs: ir.Step, rhs: ir.Step) !void {
+        const lhs_reg = self.get_register(lhs) catch |err| {
+            std.debug.panic("Could not get lhs register: {}", .{err});
+        };
+
+        const rhs_reg = self.get_register(rhs) catch |err| {
+            std.debug.panic("Could not get rhs register: {}", .{err});
+        };
+
+        const result_reg = self.temp_queue.read();
+
+        try copy(result_reg.to_generic(), lhs_reg, self.writer);
+
+        try alu_op(op, result_reg.to_generic(), rhs_reg, self.writer);
+
+        const loc = Location{ .Temp = result_reg };
+        try self.map.put(step, loc);
+        try self.temp_steps.put(result_reg, step);
+    }
+
+    fn alu_op(op: std.meta.fieldInfo(ir.Ops.Arg, .ALU).type, lhs: Register, rhs: Register, writer: anytype) !void {
+        std.log.debug("{s} {s}, {s}", .{ @tagName(op), @tagName(lhs), @tagName(rhs) });
+
+        if (rex_prefix(rhs, lhs, null)) |prefix| {
+            try writer.writeByte(prefix);
+        }
+
+        // use imul and idiv
+        // care for clobbering, will prolly need to refactor some stuff
+        // TODO: clobbering
+        const opcode: []const u8 = switch (op) {
+            .Add => ([_]u8{0x01})[0..], // ADD
+            .Mul => ([_]u8{ 0x0F, 0xaf })[0..], // IMUL
+            else => {
+                std.debug.panic("Unsupported ALU operation", .{});
+            },
+        };
+        try writer.writeAll(opcode);
+
+        const modrm_byte = switch (op) {
+            .Add => modrm(rhs, lhs, .{ .register = {} }),
+            .Mul => modrm(lhs, rhs, .{ .register = {} }), // imul swaps, idk why but its annoying
+            else => {
+                std.debug.panic("Unsupported ALU operation", .{});
+            },
+        };
+        try writer.writeByte(modrm_byte);
+    }
+
+    fn copy(dest: Register, source: Register, writer: anytype) !void {
+        std.log.debug("mov {s}, {s}", .{ @tagName(dest), @tagName(source) });
+
+        if (rex_prefix(source, dest, null)) |prefix| {
+            try writer.writeByte(prefix);
+        }
+
+        try writer.writeByte(0x89);
+
+        // Mod = 11 (register-to-register)
+        const modrm_byte = modrm(source, dest, .{ .register = {} });
+        try writer.writeByte(modrm_byte);
+    }
+
+    fn get_register(self: *ValueStore, step: ir.Step) !Register {
+        if (self.map.get(step)) |loc| {
+            return switch (loc) {
+                .Temp => |reg| reg.to_generic(),
+                .Static => |reg| reg.to_generic(),
+                .Stack => |_| {
+                    std.debug.panic("get_register: unimplemented stack storage, should pop into temp reg", .{});
+                },
+            };
+        } else if (self.consts.get(step)) |value| {
+            try self.write_value_temp(step, value[0..4].*);
+            return self.get_register(step);
+        } else {
+            return error.DeallocatedTempRegister;
+        }
+    }
+
+    pub fn store(self: *ValueStore, buffer_idx: usize, index: ir.Step, value: ir.Step) !void {
+        const reg_base = self.temp_queue.read();
+        const offset = buffer_idx * 8;
+        const bytes = std.mem.toBytes(offset)[0..4];
+
+        try load_value_from_register(reg_base.to_generic(), .Rbp, bytes.*, self.writer);
+
+        const index_reg = self.get_register(index) catch |err| {
+            std.debug.panic("Failed to get index register: {}", .{err});
+        };
+
+        const value_reg = self.get_register(value) catch |err| {
+            std.debug.panic("Failed to get value register: {}", .{err});
+        };
+
+        try store_value_to_memory_with_offset(reg_base.to_generic(), index_reg, value_reg, self.writer);
+    }
+
+    fn store_value_to_memory_with_offset(dest: Register, index: Register, value: Register, writer: anytype) !void {
+        std.log.debug("mov qword ptr [{s} + {s} * 8], {s}", .{ @tagName(dest), @tagName(index), @tagName(value) });
+
+        if (rex_prefix(value, dest, index)) |prefix| {
+            try writer.writeByte(prefix);
+        }
+
+        try writer.writeByte(0x89);
+
+        // Write the ModR/M byte: Mod = 00 (memory), Reg = value, R/M = 100 (SIB follows)
+        const modrm_byte = (0b00 << 6) | (@as(u8, @intCast(reg_encoding(value))) << 3) | 0b100;
+        try writer.writeByte(modrm_byte);
+
+        // Write the SIB byte: Scale = 0b00 (no scaling), Index = index, Base = base
+        const sib_byte = (0b11 << 6) | (@as(u8, @intCast(reg_encoding(index))) << 3) | reg_encoding(dest);
+        try writer.writeByte(sib_byte);
+    }
+
+    pub fn update(self: *ValueStore, variable: ir.Step, value: ir.Step) !void {
+        const var_reg = self.get_register(variable) catch |err| {
+            std.debug.panic("Failed to get var register: {}", .{err});
+        };
+
+        const value_reg = self.get_register(value) catch |err| {
+            std.debug.panic("Failed to get value register: {}", .{err});
+        };
+
+        try copy(var_reg, value_reg, self.writer);
     }
 };
 
@@ -653,19 +830,18 @@ fn generate_load(node: ir.Node, ctx: *Context) !void {
 
     const index = node.inputs.?[1];
 
-    // arg: [*][*]u8
-    // value: [0:4]u8 = arg[buffer_idx][index:index+4]
     try ctx.store.load_from_buffer(node.step, buffer_idx, index);
 }
 
 fn generate_alu(node: ir.Node, ctx: *Context) !void {
-    _ = node;
-    _ = ctx;
+    try ctx.store.alu(node.step, node.arg.ALU, node.inputs.?[0], node.inputs.?[1]);
 }
 
 fn generate_update(node: ir.Node, ctx: *Context) !void {
-    _ = node;
-    _ = ctx;
+    const variable = node.inputs.?[0];
+    const value = node.inputs.?[1];
+
+    try ctx.store.update(variable, value);
 }
 
 fn generate_endloop(node: ir.Node, ctx: *Context) !void {
@@ -680,13 +856,17 @@ fn generate_endloop(node: ir.Node, ctx: *Context) !void {
     const distance = ctx.code.items.len - label;
     assert(distance < 0xff);
     const offset: u8 = 0xfe - @as(u8, @truncate(distance));
-    std.log.debug("jle {x}; label_{x}", .{ offset, label });
-    try ctx.writer.writeAll(&[_]u8{ 0x7e, offset });
+    std.log.debug("jl {x}; label_{x}", .{ offset, label });
+    try ctx.writer.writeAll(&[_]u8{ 0x7c, offset });
 }
 
 fn generate_store(node: ir.Node, ctx: *Context) !void {
-    _ = node;
-    _ = ctx;
+    const buffer = ctx.block.nodes.items[node.inputs.?[0]];
+    const buffer_idx = buffer.arg.DEFINE_GLOBAL.idx;
+
+    const index = node.inputs.?[1];
+    const value = node.inputs.?[2];
+    try ctx.store.store(buffer_idx, index, value);
 }
 
 fn generate_prologue(ctx: *Context) !void {
