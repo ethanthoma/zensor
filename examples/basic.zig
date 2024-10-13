@@ -21,7 +21,8 @@ pub fn main() !void {
 
     const d = try c.sum(0);
 
-    std.debug.print("{}\n", .{c});
-    std.debug.print("{}\n", .{d});
-    std.debug.print("{}\n", .{d});
+    std.debug.print("A = {}\n", .{a});
+    std.debug.print("B = {}\n", .{b});
+    std.debug.print("C = A.mul(B) = {}\n", .{c});
+    std.debug.print("D = sum(C) = {}\n", .{d});
 }

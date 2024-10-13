@@ -147,6 +147,8 @@ pub fn run(self: *Compiler, index: NodeIndex) !*RuntimeBuffer {
 
                 const code = try x86_64.generate_kernel(self.allocator, &ir_block);
 
+                std.log.debug("Bytecode: {x:0>2}", .{code});
+
                 const mmap = try jit.Code.init(code);
                 mmap.run(buffers.items.ptr);
 
