@@ -6,13 +6,23 @@ const assert = std.debug.assert;
 
 const ir = @import("../compiler/ir.zig");
 
-// rbp: [*][*]u8
-// rdi: function arg 1
-// rsi: function arg 2
+// rdi: [*][*]u8
 
 const Op = enum(u8) {
     ret = 0xc3,
     mov_r64_imm = 0xc7,
+    xor = 0x31,
+    inc = 0xff,
+    cmp = 0x39,
+    cmp_imm = 0x81,
+    cmp_imm_rax = 0x3d,
+
+    fn special(self: @This(), opt_reg: ?Register) @This() {
+        return if (opt_reg) |reg| switch (self) {
+            .cmp_imm => if (reg == .Rax) .cmp_imm_rax else .cmp_imm,
+            else => self,
+        } else self;
+    }
 };
 
 const Register = enum(u4) {
@@ -41,65 +51,143 @@ const Register = enum(u4) {
     }
 };
 
-const Condition = enum(u4) { le };
+const EAddr = struct {
+    base: ?Register,
+    index: ?Register = null,
+    scale: u2 = 0,
+    displacement: i32 = 0,
 
-const ModRM = struct {
-    mod: u2,
-    reg: u3,
-    rm: u3,
-
-    inline fn encode(self: @This()) u8 {
-        const mod: u8 = self.mod;
-        const reg: u8 = self.reg;
-        const rm: u8 = self.rm;
-        return (mod << 6) | (reg << 3) | rm;
+    pub fn addressing_mode(self: EAddr) Addressing_Mode {
+        if (self.index != null) {
+            return if (self.displacement == 0) .SIB else .SIBDisp32;
+        } else if (self.base) |_| {
+            if (self.displacement == 0) {
+                return .Indirect;
+            } else {
+                return .IndirectDisp32;
+            }
+        } else {
+            return .RIPRelative;
+        }
     }
 };
 
-const SIB = struct {
-    scale: u2,
-    index: u3,
-    base: u3,
-
-    inline fn encode(self: @This()) u8 {
-        const scale: u8 = self.scale;
-        const index: u8 = self.index;
-        const base: u8 = self.base;
-        return (scale << 6) | (index << 3) | base;
-    }
+const Addressing_Mode = enum {
+    Register,
+    Indirect,
+    IndirectDisp32,
+    SIB,
+    SIBDisp32,
+    RIPRelative,
 };
 
 const Instruction = struct {
     op: Op,
     dest: ?Register = null,
-    modrm: ?ModRM = null,
+    source: ?Register = null,
+    addr: ?EAddr = null,
     immediate: ?[]const u8 = null,
 
-    fn rex(self: @This()) ?u8 {
-        var rex_byte: u8 = 0x40;
+    pub fn calculate_rex(self: Instruction) ?u8 {
+        var rex: u8 = 0x40;
 
         if (self.dest) |dest| {
             if (dest.is_64_bit()) {
-                rex_byte |= 0x48;
+                rex |= 0x48;
             }
 
             if (dest.is_extended()) {
-                rex_byte |= 0x44;
+                rex |= 0x44;
             }
         }
 
-        return if (rex_byte == 0x40) null else rex_byte;
+        if (self.addr) |addr| {
+            if (addr.index) |index| {
+                if (index.is_extended()) {
+                    rex |= 0x42;
+                }
+            }
+        }
+
+        if (self.source) |source| {
+            if (source.is_64_bit()) {
+                rex |= 0x48;
+            }
+
+            if (source.is_extended()) {
+                rex |= 0x41;
+            }
+        } else if (self.addr) |addr| {
+            if (addr.base) |base| {
+                if (base.is_extended()) {
+                    rex |= 0x41;
+                }
+            }
+        }
+
+        return if (rex != 0x40) rex else null;
+    }
+
+    pub fn calculate_modrm(self: Instruction) ?u8 {
+        var mod: u2 = 0;
+        var reg: u3 = 0;
+        var rm: u3 = 0;
+
+        if (self.dest) |dest| {
+            reg = dest.encoding();
+        }
+
+        if (self.addr) |addr| {
+            const addressing_mode = addr.addressing_mode();
+            switch (addressing_mode) {
+                .Register => {
+                    mod = 0b11;
+                    rm = self.source.?.encoding();
+                },
+                .Indirect => {
+                    mod = 0b00;
+                    rm = addr.base.?.encoding();
+                },
+                .IndirectDisp32 => {
+                    mod = 0b10;
+                    rm = addr.base.?.encoding();
+                },
+                .SIB, .SIBDisp32 => {
+                    rm = 0b100; // Indicates SIB byte follows
+                    mod = if (addressing_mode == .SIB) 0b00 else 0b10;
+                },
+                .RIPRelative => {
+                    mod = 0b00;
+                    rm = 0b101;
+                },
+            }
+        } else if (self.source) |source| {
+            mod = 0b11; // Register-to-register
+            rm = source.encoding();
+        }
+
+        const modrm = (@as(u8, mod) << 6) | (@as(u8, reg) << 3) | rm;
+
+        return if (modrm != 0) modrm else null;
     }
 
     fn encode(self: @This(), writer: anytype) !void {
-        if (self.rex()) |rex_byte| {
-            try writer.writeByte(rex_byte);
+        if (self.calculate_rex()) |rex| {
+            try writer.writeByte(rex);
         }
 
-        try writer.writeByte(@intFromEnum(self.op));
+        const op = @intFromEnum(self.op.special(self.source));
+        try writer.writeByte(op);
 
-        if (self.modrm) |modrm| {
-            try writer.writeByte(modrm.encode());
+        if (self.calculate_modrm()) |modrm| {
+            try writer.writeByte(modrm);
+        }
+
+        if (self.addr) |addr| {
+            const addressing_mode = addr.addressing_mode();
+            if (addressing_mode == .IndirectDisp32 or addressing_mode == .SIBDisp32 or addressing_mode == .RIPRelative) {
+                try writer.writeAll(&std.mem.toBytes(addr.displacement));
+            }
         }
 
         if (self.immediate) |immediate| {
@@ -141,17 +229,21 @@ fn CircularBuffer(comptime T: type) type {
 }
 
 const Context = struct {
+    block: *const ir.Block,
     code: std.ArrayList(u8),
     labels: std.AutoHashMap(ir.Step, usize),
     consts: std.AutoHashMap(ir.Step, []const u8),
     registers: CircularBuffer(Register),
+    map: std.AutoHashMap(ir.Step, Register),
 
-    fn init(allocator: mem.Allocator) @This() {
+    fn init(allocator: mem.Allocator, block: *const ir.Block) @This() {
         return .{
+            .block = block,
             .code = std.ArrayList(u8).init(allocator),
             .labels = std.AutoHashMap(ir.Step, usize).init(allocator),
             .consts = std.AutoHashMap(ir.Step, []const u8).init(allocator),
             .registers = CircularBuffer(Register).init(),
+            .map = std.AutoHashMap(ir.Step, Register).init(allocator),
         };
     }
 
@@ -159,11 +251,12 @@ const Context = struct {
         self.code.deinit();
         self.labels.deinit();
         self.consts.deinit();
+        self.map.deinit();
     }
 };
 
 pub fn generate_kernel(allocator: mem.Allocator, block: *const ir.Block) ![]const u8 {
-    var ctx = Context.init(allocator);
+    var ctx = Context.init(allocator, block);
     defer ctx.deinit();
 
     try generate_prologue(&ctx);
@@ -182,31 +275,67 @@ fn generate_node(node: ir.Node, ctx: *Context) !void {
         .DEFINE_GLOBAL => {},
         .DEFINE_ACC => try generate_define_acc(node, ctx),
         .CONST => try generate_const(node, ctx),
-        //.LOOP => try generate_loop(node, ctx),
+        .LOOP => try generate_loop(node, ctx),
         //.LOAD => try generate_load(node, ctx),
         //.ALU => try generate_alu(node, ctx),
         //.UPDATE => try generate_update(node, ctx),
-        //.ENDLOOP => try generate_endloop(node, ctx),
+        .ENDLOOP => try generate_endloop(node, ctx),
         //.STORE => try generate_store(node, ctx),
         else => {},
     }
 }
 
 fn generate_define_acc(node: ir.Node, ctx: *Context) !void {
-    const reg = ctx.registers.read();
+    const dest = ctx.registers.read();
 
-    var immediate: [4]u8 = undefined;
+    try mov(
+        dest,
+        .{ .Immediate = .{ .dtype = node.dtype.?, .value = node.arg.DEFINE_ACC } },
+        ctx.code.writer(),
+    );
 
-    try value_to_4_bytes(node.dtype.?, &immediate, node.arg.DEFINE_ACC);
+    try ctx.map.put(node.step, dest);
+}
 
-    try (Instruction{
-        .op = .mov_r64_imm,
-        .dest = reg,
-        .modrm = .{ .mod = 3, .reg = 0, .rm = reg.encoding() },
-        .immediate = &immediate,
-    }).encode(ctx.code.writer());
+const Mov_Options = union(enum) {
+    Register: Register,
+    Immediate: struct {
+        dtype: ir.DataTypes,
+        value: []const u8,
+    },
+};
 
-    std.debug.print("mov {s}, {s}", .{ @tagName(reg), node.arg.DEFINE_ACC });
+fn mov(dest: Register, source: Mov_Options, writer: anytype) !void {
+    switch (source) {
+        .Register => |source_register| {
+            std.debug.panic("mov: register-register unimplemented", .{});
+
+            std.log.debug("mov {s}, {s}", .{ @tagName(dest), @tagName(source_register) });
+        },
+        .Immediate => |immediate| {
+            var value: [4]u8 = undefined;
+
+            try value_to_4_bytes(immediate.dtype, &value, immediate.value);
+
+            if (mem.bytesToValue(u32, &value) == 0) {
+                try (Instruction{
+                    .op = .xor,
+                    .dest = dest,
+                    .source = dest,
+                }).encode(writer);
+
+                std.log.debug("xor {s}, {s}", .{ @tagName(dest), @tagName(dest) });
+            } else {
+                try (Instruction{
+                    .op = .mov_r64_imm,
+                    .dest = dest,
+                    .immediate = &value,
+                }).encode(writer);
+
+                std.log.debug("mov {s}, {s}", .{ @tagName(dest), immediate.value });
+            }
+        },
+    }
 }
 
 fn value_to_4_bytes(dtype: ir.DataTypes, dest: *[4]u8, source: []const u8) !void {
@@ -234,8 +363,21 @@ fn generate_const(node: ir.Node, ctx: *Context) !void {
 }
 
 fn generate_loop(node: ir.Node, ctx: *Context) !void {
-    _ = node;
-    _ = ctx;
+    const dest = ctx.registers.read();
+
+    const start_step = node.inputs.?[0];
+
+    if (ctx.consts.get(start_step)) |value| {
+        try mov(
+            dest,
+            .{ .Immediate = .{ .value = value, .dtype = .Int } },
+            ctx.code.writer(),
+        );
+    }
+
+    try ctx.map.put(node.step, dest);
+
+    try ctx.labels.put(node.step, ctx.code.items.len);
 }
 
 fn generate_load(node: ir.Node, ctx: *Context) !void {
@@ -254,8 +396,25 @@ fn generate_update(node: ir.Node, ctx: *Context) !void {
 }
 
 fn generate_endloop(node: ir.Node, ctx: *Context) !void {
-    _ = node;
-    _ = ctx;
+    const index = ctx.map.get(node.inputs.?[0]).?;
+
+    try (Instruction{ .op = .inc, .source = index }).encode(ctx.code.writer());
+
+    std.log.debug("inc {s}", .{@tagName(index)});
+
+    if (ctx.map.get(ctx.block.nodes.items[node.inputs.?[0]].inputs.?[1])) |end| {
+        try (Instruction{ .op = .cmp, .dest = index, .source = end }).encode(ctx.code.writer());
+
+        std.log.debug("cmp {s}, {s}", .{ @tagName(index), @tagName(end) });
+    } else if (ctx.consts.get(ctx.block.nodes.items[node.inputs.?[0]].inputs.?[1])) |immediate_value| {
+        var value: [4]u8 = undefined;
+
+        try value_to_4_bytes(.Int, &value, immediate_value);
+
+        try (Instruction{ .op = .cmp_imm, .source = index, .immediate = &value }).encode(ctx.code.writer());
+
+        std.log.debug("cmp {s}, {s}", .{ @tagName(index), value });
+    }
 }
 
 fn generate_store(node: ir.Node, ctx: *Context) !void {
@@ -268,5 +427,6 @@ fn generate_prologue(ctx: *Context) !void {
 }
 
 fn generate_epilogue(ctx: *Context) !void {
+    std.log.debug("ret", .{});
     try (Instruction{ .op = .ret }).encode(ctx.code.writer());
 }
