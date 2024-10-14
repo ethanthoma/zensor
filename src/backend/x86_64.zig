@@ -15,14 +15,10 @@ const Op = enum(u8) {
     inc = 0xff,
     cmp = 0x39,
     cmp_imm = 0x81,
-    cmp_imm_rax = 0x3d,
+};
 
-    fn special(self: @This(), opt_reg: ?Register) @This() {
-        return if (opt_reg) |reg| switch (self) {
-            .cmp_imm => if (reg == .Rax) .cmp_imm_rax else .cmp_imm,
-            else => self,
-        } else self;
-    }
+const AOp = enum(u3) {
+    cmp = 0b111,
 };
 
 const Register = enum(u4) {
@@ -81,12 +77,16 @@ const Addressing_Mode = enum {
     RIPRelative,
 };
 
+const Operand = union(enum) {
+    Register: Register,
+    Memory: EAddr,
+    Immediate: []const u8,
+};
+
 const Instruction = struct {
     op: Op,
     dest: ?Register = null,
-    source: ?Register = null,
-    addr: ?EAddr = null,
-    immediate: ?[]const u8 = null,
+    source: ?Operand = null,
 
     pub fn calculate_rex(self: Instruction) ?u8 {
         var rex: u8 = 0x40;
@@ -101,27 +101,31 @@ const Instruction = struct {
             }
         }
 
-        if (self.addr) |addr| {
-            if (addr.index) |index| {
-                if (index.is_extended()) {
-                    rex |= 0x42;
-                }
-            }
-        }
-
         if (self.source) |source| {
-            if (source.is_64_bit()) {
-                rex |= 0x48;
-            }
+            switch (source) {
+                .Memory => |addr| {
+                    if (addr.index) |index| {
+                        if (index.is_extended()) {
+                            rex |= 0x42;
+                        }
+                    }
 
-            if (source.is_extended()) {
-                rex |= 0x41;
-            }
-        } else if (self.addr) |addr| {
-            if (addr.base) |base| {
-                if (base.is_extended()) {
-                    rex |= 0x41;
-                }
+                    if (addr.base) |base| {
+                        if (base.is_extended()) {
+                            rex |= 0x41;
+                        }
+                    }
+                },
+                .Register => |reg| {
+                    if (reg.is_64_bit()) {
+                        rex |= 0x48;
+                    }
+
+                    if (reg.is_extended()) {
+                        rex |= 0x41;
+                    }
+                },
+                .Immediate => {},
             }
         }
 
@@ -137,33 +141,36 @@ const Instruction = struct {
             reg = dest.encoding();
         }
 
-        if (self.addr) |addr| {
-            const addressing_mode = addr.addressing_mode();
-            switch (addressing_mode) {
-                .Register => {
-                    mod = 0b11;
-                    rm = self.source.?.encoding();
+        if (self.source) |source| {
+            switch (source) {
+                .Immediate => {},
+                .Register => |register| {
+                    rm = register.encoding();
+                    mod = 0b11; // Register-to-register
                 },
-                .Indirect => {
-                    mod = 0b00;
-                    rm = addr.base.?.encoding();
-                },
-                .IndirectDisp32 => {
-                    mod = 0b10;
-                    rm = addr.base.?.encoding();
-                },
-                .SIB, .SIBDisp32 => {
-                    rm = 0b100; // Indicates SIB byte follows
-                    mod = if (addressing_mode == .SIB) 0b00 else 0b10;
-                },
-                .RIPRelative => {
-                    mod = 0b00;
-                    rm = 0b101;
+                .Memory => |addr| {
+                    const addressing_mode = addr.addressing_mode();
+                    switch (addressing_mode) {
+                        .Register => {},
+                        .Indirect => {
+                            mod = 0b00;
+                            rm = addr.base.?.encoding();
+                        },
+                        .IndirectDisp32 => {
+                            mod = 0b10;
+                            rm = addr.base.?.encoding();
+                        },
+                        .SIB, .SIBDisp32 => {
+                            rm = 0b100; // Indicates SIB byte follows
+                            mod = if (addressing_mode == .SIB) 0b00 else 0b10;
+                        },
+                        .RIPRelative => {
+                            mod = 0b00;
+                            rm = 0b101;
+                        },
+                    }
                 },
             }
-        } else if (self.source) |source| {
-            mod = 0b11; // Register-to-register
-            rm = source.encoding();
         }
 
         const modrm = (@as(u8, mod) << 6) | (@as(u8, reg) << 3) | rm;
@@ -176,22 +183,25 @@ const Instruction = struct {
             try writer.writeByte(rex);
         }
 
-        const op = @intFromEnum(self.op.special(self.source));
-        try writer.writeByte(op);
+        try writer.writeByte(@intFromEnum(self.op));
 
         if (self.calculate_modrm()) |modrm| {
             try writer.writeByte(modrm);
         }
 
-        if (self.addr) |addr| {
-            const addressing_mode = addr.addressing_mode();
-            if (addressing_mode == .IndirectDisp32 or addressing_mode == .SIBDisp32 or addressing_mode == .RIPRelative) {
-                try writer.writeAll(&std.mem.toBytes(addr.displacement));
+        if (self.source) |source| {
+            switch (source) {
+                .Memory => |addr| {
+                    const addressing_mode = addr.addressing_mode();
+                    if (addressing_mode == .IndirectDisp32 or addressing_mode == .SIBDisp32 or addressing_mode == .RIPRelative) {
+                        try writer.writeAll(&std.mem.toBytes(addr.displacement));
+                    }
+                },
+                .Immediate => |immediate| {
+                    try writer.writeAll(immediate);
+                },
+                .Register => {},
             }
-        }
-
-        if (self.immediate) |immediate| {
-            try writer.writeAll(immediate);
         }
     }
 };
@@ -321,7 +331,7 @@ fn mov(dest: Register, source: Mov_Options, writer: anytype) !void {
                 try (Instruction{
                     .op = .xor,
                     .dest = dest,
-                    .source = dest,
+                    .source = .{ .Register = dest },
                 }).encode(writer);
 
                 std.log.debug("xor {s}, {s}", .{ @tagName(dest), @tagName(dest) });
@@ -329,7 +339,7 @@ fn mov(dest: Register, source: Mov_Options, writer: anytype) !void {
                 try (Instruction{
                     .op = .mov_r64_imm,
                     .dest = dest,
-                    .immediate = &value,
+                    .source = .{ .Immediate = &value },
                 }).encode(writer);
 
                 std.log.debug("mov {s}, {s}", .{ @tagName(dest), immediate.value });
@@ -398,12 +408,12 @@ fn generate_update(node: ir.Node, ctx: *Context) !void {
 fn generate_endloop(node: ir.Node, ctx: *Context) !void {
     const index = ctx.map.get(node.inputs.?[0]).?;
 
-    try (Instruction{ .op = .inc, .source = index }).encode(ctx.code.writer());
+    try (Instruction{ .op = .inc, .source = .{ .Register = index } }).encode(ctx.code.writer());
 
     std.log.debug("inc {s}", .{@tagName(index)});
 
     if (ctx.map.get(ctx.block.nodes.items[node.inputs.?[0]].inputs.?[1])) |end| {
-        try (Instruction{ .op = .cmp, .dest = index, .source = end }).encode(ctx.code.writer());
+        try (Instruction{ .op = .cmp, .dest = index, .source = .{ .Register = end } }).encode(ctx.code.writer());
 
         std.log.debug("cmp {s}, {s}", .{ @tagName(index), @tagName(end) });
     } else if (ctx.consts.get(ctx.block.nodes.items[node.inputs.?[0]].inputs.?[1])) |immediate_value| {
@@ -411,7 +421,7 @@ fn generate_endloop(node: ir.Node, ctx: *Context) !void {
 
         try value_to_4_bytes(.Int, &value, immediate_value);
 
-        try (Instruction{ .op = .cmp_imm, .source = index, .immediate = &value }).encode(ctx.code.writer());
+        try (Instruction{ .op = .cmp_imm, .dest = index, .source = .{ .Immediate = &value } }).encode(ctx.code.writer());
 
         std.log.debug("cmp {s}, {s}", .{ @tagName(index), value });
     }
