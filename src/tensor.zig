@@ -164,14 +164,14 @@ pub fn Tensor(comptime datatype: dtypes.DType, comptime shape: anytype) type {
 fn array_init_shape(comptime tuple: anytype) []const u32 {
     comptime {
         switch (@typeInfo(@TypeOf(tuple))) {
-            .Struct, .Union, .Enum => {
+            .@"struct", .@"union", .@"enum" => {
                 const fields = std.meta.fields(@TypeOf(tuple));
 
                 var shape: [fields.len]u32 = undefined;
 
                 for (fields, 0..) |field, i| {
                     switch (@typeInfo(field.type)) {
-                        .Int, .ComptimeInt => {
+                        .int, .comptime_int => {
                             const value = @field(tuple, field.name);
 
                             if (value <= 0) {
@@ -195,10 +195,10 @@ fn array_init_shape(comptime tuple: anytype) []const u32 {
                 const final_shape = shape;
                 return &final_shape;
             },
-            .Pointer => |info| {
-                if (info.size == .Slice) {
+            .pointer => |info| {
+                if (info.size == .slice) {
                     switch (@typeInfo(info.child)) {
-                        .Int, .ComptimeInt => {
+                        .int, .comptime_int => {
                             var shape: [info.child.len]u32 = undefined;
 
                             for (tuple, 0..) |elem, i| {
@@ -214,16 +214,16 @@ fn array_init_shape(comptime tuple: anytype) []const u32 {
                             .{info.child},
                         )),
                     }
-                } else if (info.size == .One) {
+                } else if (info.size == .one) {
                     return array_init_shape(tuple.*);
                 } else {
                     @compileError(std.fmt.comptimePrint("Shape dims must be a tuple, slice, or array." ++
                         "  You passed in type {}", .{@TypeOf(tuple)}));
                 }
             },
-            .Array => |info| {
+            .array => |info| {
                 switch (@typeInfo(info.child)) {
-                    .Int, .ComptimeInt => {
+                    .int, .comptime_int => {
                         var shape: [info.len]u32 = undefined;
 
                         for (tuple, 0..) |elem, i| {

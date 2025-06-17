@@ -78,7 +78,7 @@ pub const Ops = enum {
 
             inline for (std.meta.fields(Self)) |field| {
                 if (self == @field(Self, field.name)) {
-                    if (@typeInfo(@TypeOf(@field(self, field.name))) == .Void) {
+                    if (@typeInfo(@TypeOf(@field(self, field.name))) == .void) {
                         try writer.print("None", .{});
                     } else if (@TypeOf(@field(self, field.name)) == []const u8) {
                         try writer.print("{s}", .{@field(self, field.name)});
@@ -139,7 +139,7 @@ pub const Node = struct {
             try writer.print(" ", .{});
         }
 
-        if (@typeInfo(@TypeOf(self.arg)) == .Void) {
+        if (@typeInfo(@TypeOf(self.arg)) == .void) {
             try writer.print("None", .{});
         } else {
             try writer.print("{any}", .{self.arg});

@@ -97,7 +97,7 @@ pub const Node = struct {
                 const input = @field(self.input, @tagName(op));
                 const arg = @field(self.arg, @tagName(op));
 
-                if (@typeInfo(@TypeOf(input)) == .Array) {
+                if (@typeInfo(@TypeOf(input)) == .array) {
                     inline for (input) |elem| {
                         if (@TypeOf(elem) == *const Self) {
                             const elem_hash = hash(elem.*);
@@ -113,20 +113,20 @@ pub const Node = struct {
                 const hash_arg = struct {
                     fn hash_arg(_hasher: anytype, _arg: anytype) void {
                         switch (@typeInfo(@TypeOf(_arg))) {
-                            .Struct, .Union => {
+                            .@"struct", .@"union" => {
                                 inline for (comptime std.meta.fieldNames(@TypeOf(_arg))) |field_name| {
                                     const field = @field(_arg, field_name);
                                     hash_arg(_hasher, field);
                                 }
                             },
-                            .Pointer => |info| {
-                                if (info.size == .Slice) {
+                            .pointer => |info| {
+                                if (info.size == .slice) {
                                     if (info.child == u8) {
                                         _hasher.update(_arg);
                                     } else {
                                         _hasher.update(std.mem.sliceAsBytes(_arg));
                                     }
-                                } else if (info.size == .One) {
+                                } else if (info.size == .one) {
                                     _hasher.update(std.mem.asBytes(&@intFromPtr(_arg)));
                                 }
                             },
@@ -149,21 +149,21 @@ pub const Node = struct {
             a.view == b.view and
             a.op == b.op and
             blk: {
-            switch (a.op) {
-                inline else => |op| {
-                    const inputs_a = @field(a.input, @tagName(op));
-                    const inputs_b = @field(b.input, @tagName(op));
+                switch (a.op) {
+                    inline else => |op| {
+                        const inputs_a = @field(a.input, @tagName(op));
+                        const inputs_b = @field(b.input, @tagName(op));
 
-                    if (@typeInfo(@TypeOf(inputs_a)) == .Array) {
-                        var same = true;
-                        for (inputs_a, inputs_b) |input_a, input_b| {
-                            same = same and input_a == input_b;
-                        }
-                        break :blk same;
-                    } else break :blk true;
-                },
-            }
-        };
+                        if (@typeInfo(@TypeOf(inputs_a)) == .array) {
+                            var same = true;
+                            for (inputs_a, inputs_b) |input_a, input_b| {
+                                same = same and input_a == input_b;
+                            }
+                            break :blk same;
+                        } else break :blk true;
+                    },
+                }
+            };
     }
 
     const LinkedStr = struct {
@@ -258,7 +258,7 @@ pub const Node = struct {
                 }
 
                 // print children
-                if (@typeInfo(@TypeOf(input)) == .Array) {
+                if (@typeInfo(@TypeOf(input)) == .array) {
                     for (input, 1..) |child, i| {
                         try writer.writeAll("\n");
                         try child.format_helper(
