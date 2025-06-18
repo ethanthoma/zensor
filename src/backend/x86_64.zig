@@ -143,24 +143,17 @@ const ValueStore = struct {
         Variable: ir.Step,
     };
 
-    pub fn load_from_buffer(self: *Self, step: ir.Step, buffer_idx: u32, index: ir.Step, encoder: *Encoder) !void {
-        const reg = self.temp_queue.read();
-        try encoder.mov_reg_from_mem(reg, .Rbp, buffer_idx * 8);
-
-        const index_reg = try (self.peek(index) orelse error.InvalidIndex);
-        try encoder.mov_reg_from_mem_sib(reg, reg, index_reg, 0b11);
-
-        const loc = Location{ .Temp = reg };
-        try self.map.put(step, loc);
-        try self.temp_steps.put(reg, step);
-    }
-
-    pub fn write_const(self: *Self, step: ir.Step, value: []u8) !void {
-        try self.consts.put(step, value);
-    }
-
     pub fn assign_static(self: *Self, step_dest: ir.Step, source: SourceValue, encoder: *Encoder) !void {
-        const loc_dest = try self.alloc_static_location(step_dest);
+        const loc_dest = if (self.static_list.pop()) |reg| blk: {
+            const loc = Location{ .Static = reg };
+            try self.map.put(step_dest, loc);
+            break :blk loc;
+        } else blk: {
+            self.offset += 4;
+            const loc = Location{ .Stack = -self.offset };
+            try self.map.put(step_dest, loc);
+            break :blk loc;
+        };
 
         switch (loc_dest) {
             .Static => |reg| switch (source) {
@@ -168,7 +161,7 @@ const ValueStore = struct {
                 .Variable => |step_source| if (self.consts.get(step_source)) |bytes| {
                     try encoder.mov_reg_imm32(reg, mem.bytesToValue(u32, bytes));
                 } else {
-                    try encoder.push_reg(try self.ensure_in_register(step_source, encoder));
+                    try encoder.mov_reg_reg(reg, try self.ensure_in_register(step_source, encoder));
                 },
             },
             .Stack => |_| switch (source) {
@@ -181,39 +174,6 @@ const ValueStore = struct {
             },
             .Temp => unreachable,
         }
-    }
-
-    pub fn cmp(self: *Self, dest: ir.Step, source: ir.Step, encoder: *Encoder) !void {
-        const reg_dest = self.peek(dest) orelse {
-            // only support comparing const and reg or reg and reg
-            assert(self.map.contains(source));
-            return self.cmp(source, dest, encoder);
-        };
-
-        if (self.peek(source)) |reg_src| {
-            try encoder.cmp_reg_reg(reg_dest, reg_src);
-        } else if (self.consts.get(source)) |const_value| {
-            try encoder.cmp_reg_imm32(reg_dest, mem.bytesToValue(u32, const_value));
-        }
-    }
-
-    pub fn alu(self: *Self, step: ir.Step, op: meta.fieldInfo(ir.Ops.Arg, .ALU).type, lhs: ir.Step, rhs: ir.Step, encoder: *Encoder) !void {
-        const lhs_reg = try self.ensure_in_register(lhs, encoder);
-        const rhs_reg = try self.ensure_in_register(rhs, encoder);
-
-        const reg_result = self.temp_queue.read();
-
-        try encoder.mov_reg_reg(reg_result, lhs_reg);
-
-        switch (op) {
-            .Add => try encoder.add_reg_reg(reg_result, rhs_reg),
-            .Mul => try encoder.imul_reg_reg(reg_result, rhs_reg),
-            else => @panic("Unsupported ALU operation"),
-        }
-
-        const loc = Location{ .Temp = reg_result };
-        try self.map.put(step, loc);
-        try self.temp_steps.put(reg_result, step);
     }
 
     fn peek(self: *const Self, step: ir.Step) ?Register {
@@ -245,49 +205,6 @@ const ValueStore = struct {
         try self.temp_steps.put(reg, step);
 
         return reg;
-    }
-
-    fn alloc_static_location(self: *Self, step: ir.Step) !Location {
-        if (self.static_list.pop()) |reg| {
-            const loc = Location{ .Static = reg };
-            try self.map.put(step, loc);
-            return loc;
-        } else {
-            self.offset += 4;
-            const loc = Location{ .Stack = -self.offset };
-            try self.map.put(step, loc);
-            return loc;
-        }
-    }
-
-    pub fn store(self: *Self, buffer_idx: u32, step_index: ir.Step, step_value: ir.Step, encoder: *Encoder) !void {
-        const reg_base = self.temp_queue.read();
-
-        try encoder.mov_reg_from_mem(reg_base, .Rbp, buffer_idx * 8);
-
-        const reg_index = self.peek(step_index) orelse
-            if (self.consts.get(step_index)) |value|
-                try self.alloc_temp(step_index, mem.bytesToValue(u32, value), encoder)
-            else
-                @panic("Failed to get index register");
-
-        const reg_value = self.peek(step_value) orelse
-            if (self.consts.get(step_value)) |value|
-                try self.alloc_temp(step_value, mem.bytesToValue(u32, value), encoder)
-            else
-                @panic("Failed to get value register");
-
-        try encoder.mov_mem_sib_from_reg(reg_base, reg_index, reg_value, 0b11);
-    }
-
-    pub fn update(self: *Self, step_variable: ir.Step, step_value: ir.Step, encoder: *Encoder) !void {
-        const reg_variable = self.peek(step_variable) orelse @panic("Variable must be a non const register");
-
-        if (self.peek(step_value)) |reg_value| {
-            try encoder.mov_reg_reg(reg_variable, reg_value);
-        } else if (self.consts.get(step_value)) |value| {
-            try encoder.mov_reg_imm32(reg_variable, mem.bytesToValue(u32, value));
-        }
     }
 };
 
@@ -597,6 +514,7 @@ fn generate_node(ctx: *Context) !void {
     ctx.cursor += 1;
 }
 
+// TODO: I made everything an int but that isnt correct. Need to change IR to handle bytes directly
 fn generate_define_acc(node: ir.Node, ctx: *Context) !void {
     const value = try fmt.parseInt(u32, node.arg.DEFINE_ACC, 10);
 
@@ -618,16 +536,14 @@ fn generate_const(node: ir.Node, ctx: *Context) !void {
 
     try value_to_4_bytes(node.dtype.?, &value, node.arg.CONST);
 
-    try ctx.store.write_const(node.step, value);
+    try ctx.store.consts.put(node.step, value);
 }
 
 fn generate_loop(node: ir.Node, ctx: *Context) !void {
     const start = node.inputs.?[0];
 
-    // mov index, start
     try ctx.store.assign_static(node.step, .{ .Variable = start }, ctx.encoder);
 
-    // label
     std.log.debug("label_{x}:", .{ctx.code.items.len});
     try ctx.labels.put(node.step, ctx.code.items.len);
 }
@@ -638,18 +554,46 @@ fn generate_load(node: ir.Node, ctx: *Context) !void {
 
     const index = node.inputs.?[1];
 
-    try ctx.store.load_from_buffer(node.step, buffer_idx, index, ctx.encoder);
+    const reg = ctx.store.temp_queue.read();
+    try ctx.encoder.mov_reg_from_mem(reg, .Rbp, buffer_idx * 8);
+
+    const index_reg = try (ctx.store.peek(index) orelse error.InvalidIndex);
+    try ctx.encoder.mov_reg_from_mem_sib(reg, reg, index_reg, 0b11);
+
+    try ctx.store.map.put(node.step, .{ .Temp = reg });
+    try ctx.store.temp_steps.put(reg, node.step);
 }
 
 fn generate_alu(node: ir.Node, ctx: *Context) !void {
-    try ctx.store.alu(node.step, node.arg.ALU, node.inputs.?[0], node.inputs.?[1], ctx.encoder);
+    const lhs_reg = try ctx.store.ensure_in_register(node.inputs.?[0], ctx.encoder);
+    const rhs_reg = try ctx.store.ensure_in_register(node.inputs.?[1], ctx.encoder);
+
+    const reg_result = ctx.store.temp_queue.read();
+
+    try ctx.encoder.mov_reg_reg(reg_result, lhs_reg);
+
+    switch (node.arg.ALU) {
+        .Add => try ctx.encoder.add_reg_reg(reg_result, rhs_reg),
+        .Mul => try ctx.encoder.imul_reg_reg(reg_result, rhs_reg),
+        else => @panic("Unsupported ALU operation"),
+    }
+
+    try ctx.store.map.put(node.step, .{ .Temp = reg_result });
+    try ctx.store.temp_steps.put(reg_result, node.step);
 }
 
 fn generate_update(node: ir.Node, ctx: *Context) !void {
-    const variable = node.inputs.?[0];
-    const value = node.inputs.?[1];
+    const step_variable = node.inputs.?[0];
+    const step_value = node.inputs.?[1];
 
-    try ctx.store.update(variable, value, ctx.encoder);
+    const reg_variable = ctx.store.peek(step_variable) orelse
+        @panic("Variable must be a non const register");
+
+    if (ctx.store.peek(step_value)) |reg_value| {
+        try ctx.encoder.mov_reg_reg(reg_variable, reg_value);
+    } else if (ctx.store.consts.get(step_value)) |value| {
+        try ctx.encoder.mov_reg_imm32(reg_variable, mem.bytesToValue(u32, value));
+    }
 }
 
 fn generate_endloop(node: ir.Node, ctx: *Context) !void {
@@ -659,7 +603,14 @@ fn generate_endloop(node: ir.Node, ctx: *Context) !void {
     try if (ctx.store.peek(index_step)) |reg| ctx.encoder.inc_reg(reg);
 
     const end_step: ir.Step = ctx.block.nodes.items[node.inputs.?[0]].inputs.?[1];
-    try ctx.store.cmp(index_step, end_step, ctx.encoder);
+
+    const reg_dest = ctx.store.peek(index_step).?;
+
+    if (ctx.store.peek(end_step)) |reg_src| {
+        try ctx.encoder.cmp_reg_reg(reg_dest, reg_src);
+    } else if (ctx.store.consts.get(end_step)) |const_value| {
+        try ctx.encoder.cmp_reg_imm32(reg_dest, mem.bytesToValue(u32, const_value));
+    }
 
     const label = ctx.labels.get(index_step).?;
     const distance = ctx.code.items.len - label;
@@ -673,9 +624,26 @@ fn generate_store(node: ir.Node, ctx: *Context) !void {
     const buffer = ctx.block.nodes.items[node.inputs.?[0]];
     const buffer_idx = buffer.arg.DEFINE_GLOBAL.idx;
 
-    const index = node.inputs.?[1];
-    const value = node.inputs.?[2];
-    try ctx.store.store(buffer_idx, index, value, ctx.encoder);
+    const step_index = node.inputs.?[1];
+    const step_value = node.inputs.?[2];
+
+    const reg_base = ctx.store.temp_queue.read();
+
+    try ctx.encoder.mov_reg_from_mem(reg_base, .Rbp, buffer_idx * 8);
+
+    const reg_index = ctx.store.peek(step_index) orelse
+        if (ctx.store.consts.get(step_index)) |value|
+            try ctx.store.alloc_temp(step_index, mem.bytesToValue(u32, value), ctx.encoder)
+        else
+            @panic("Failed to get index register");
+
+    const reg_value = ctx.store.peek(step_value) orelse
+        if (ctx.store.consts.get(step_value)) |value|
+            try ctx.store.alloc_temp(step_value, mem.bytesToValue(u32, value), ctx.encoder)
+        else
+            @panic("Failed to get value register");
+
+    try ctx.encoder.mov_mem_sib_from_reg(reg_base, reg_index, reg_value, 0b11);
 }
 
 fn generate_prologue(ctx: *Context) !void {
