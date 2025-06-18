@@ -1,14 +1,11 @@
 const std = @import("std");
 const mem = std.mem;
+const meta = std.meta;
 const fmt = std.fmt;
 const io = std.io;
 const assert = std.debug.assert;
 
 const ir = @import("../compiler/ir.zig");
-
-// rbp: [*][*]u8
-// rdi: function arg 1
-// rsi: function arg 2
 
 const Context = struct {
     block: *const ir.Block,
@@ -17,719 +14,540 @@ const Context = struct {
     writer: *std.ArrayList(u8).Writer,
     store: *ValueStore,
     labels: *std.AutoHashMap(ir.Step, usize),
+    encoder: *Encoder,
 };
 
-const ReturnRegister = enum { Rax };
-
-const StackRegister = enum { Rsp };
-
-const ParamRegister = enum { Rbp };
-
-const FunctionCallingRegister = enum { Rdi, Rsi };
-
-const StaticRegister = enum {
+// rbp: [*][*]u8
+// rdi: function arg 1
+// rsi: function arg 2
+pub const Register = enum(u8) {
+    // static
     Rax,
     Rcx,
     Rdx,
     Rdi,
     Rsi,
 
-    pub fn to_generic(self: @This()) Register {
-        inline for (std.meta.fields(Register)) |field| {
-            if (mem.eql(u8, @tagName(self), field.name)) {
-                return @enumFromInt(field.value);
-            }
-        } else {
-            unreachable;
-        }
-    }
-};
-
-const TempRegister = enum {
+    // temp
     R8,
     R9,
     R10,
     R11,
 
-    pub fn to_generic(self: @This()) Register {
-        inline for (std.meta.fields(Register)) |field| {
-            if (mem.eql(u8, @tagName(self), field.name)) {
-                return @enumFromInt(field.value);
-            }
-        } else {
-            unreachable;
-        }
-    }
-};
+    // special
+    Rsp,
+    Rbp,
 
-const Register = blk: {
-    const register_list = [_]type{
-        ReturnRegister,
-        StackRegister,
-        ParamRegister,
-        FunctionCallingRegister,
-        StaticRegister,
-        TempRegister,
-    };
-
-    var length = 0;
-    for (register_list) |T| {
-        length += std.meta.fields(T).len;
-    }
-
-    var idx = 0;
-    var fields: [length]std.builtin.Type.EnumField = undefined;
-    for (register_list) |T| {
-        loop: for (std.meta.fields(T)) |field| {
-            // check if name already in enum
-            for (0..idx) |i| {
-                if (std.mem.eql(u8, fields[i].name, field.name)) {
-                    continue :loop;
-                }
-            }
-
-            fields[idx] = .{
-                .name = field.name,
-                .value = idx,
-            };
-
-            idx += 1;
-        }
-    }
-
-    break :blk @Type(.{
-        .@"enum" = .{
-            .tag_type = usize,
-            .fields = fields[0..idx],
-            .decls = &[_]std.builtin.Type.Declaration{}, // has to be empty
-            .is_exhaustive = true,
-        },
-    });
-};
-
-fn rex_prefix(dest: Register, source: ?Register, reg: ?Register) ?u8 {
-    var rex: u8 = 0b01000000;
-
-    // 64 bit registers
-    rex |= 0b00001000;
-
-    if (is_extended(dest)) {
-        rex |= 0b00000100;
-    }
-
-    if (source) |src| {
-        if (is_extended(src)) {
-            rex |= 0b00000001;
-        }
-    }
-
-    if (reg) |offset| {
-        if (is_extended(offset)) {
-            rex |= 0b00000010;
-        }
-    }
-
-    if (rex == 0b01000000) {
-        return null;
-    } else {
-        return rex;
-    }
-}
-
-fn is_extended(reg: Register) bool {
-    return switch (reg) {
-        .R8, .R9, .R10, .R11 => true,
-        else => false,
-    };
-}
-
-fn reg_encoding(reg: Register) u3 {
-    return switch (reg) {
-        .Rax => 0b000,
-        .Rcx => 0b001,
-        .Rdx => 0b010,
-        .Rsp => 0b100,
-        .Rbp => 0b101,
-        .Rsi => 0b110,
-        .Rdi => 0b111,
-
-        .R8 => 0b000,
-        .R9 => 0b001,
-        .R10 => 0b010,
-        .R11 => 0b011,
-    };
-}
-
-const ModRMOptions = union(enum) {
-    displacement: enum {
-        None,
-        Byte,
-        Word,
-    },
-    register: void,
-
-    pub fn value(self: ModRMOptions) u2 {
+    pub fn is_static(self: @This()) bool {
         return switch (self) {
-            .displacement => |displacement| switch (displacement) {
-                .None => 0b00,
-                .Byte => 0b01,
-                .Word => 0b10,
-            },
-            .register => 0b11,
+            .Rax, .Rcx, .Rdx, .Rdi, .Rsi => true,
+            else => false,
+        };
+    }
+
+    pub fn is_temp(self: @This()) bool {
+        return switch (self) {
+            .R8, .R9, .R10, .R11 => true,
+            else => false,
+        };
+    }
+
+    pub fn is_extended(self: @This()) bool {
+        return switch (self) {
+            .R8, .R9, .R10, .R11 => true,
+            else => false,
+        };
+    }
+
+    pub fn reg_encoding(self: @This()) u3 {
+        return switch (self) {
+            .Rax, .R8 => 0b000,
+            .Rcx, .R9 => 0b001,
+            .Rdx, .R10 => 0b010,
+            .R11 => 0b011,
+            .Rsp => 0b100,
+            .Rbp => 0b101,
+            .Rsi => 0b110,
+            .Rdi => 0b111,
         };
     }
 };
 
-fn modrm(dest: Register, source: Register, options: ModRMOptions) u8 {
-    const mod: u8 = options.value();
+const CircularBuffer = struct {
+    const Self = @This();
 
-    const reg: u8 = reg_encoding(dest);
+    const size = 12;
 
-    const rm: u8 = reg_encoding(source);
+    buffer: [size]Register,
+    head: usize,
 
-    return mod << 6 | reg << 3 | rm;
-}
+    pub fn init() Self {
+        comptime var self = Self{ .buffer = undefined, .head = 0 };
 
-fn CircularBuffer(comptime T: type) type {
-    if (@typeInfo(T) != .@"enum") @compileError("must be enum");
+        comptime var idx = 0;
+        inline for (comptime meta.tags(Register)) |tag| comptime if (tag.is_temp()) {
+            self.buffer[idx] = tag;
+            idx += 1;
+        };
 
-    const size = std.meta.fields(T).len;
+        return self;
+    }
 
-    return struct {
-        const Self = @This();
+    pub fn read(self: *Self) Register {
+        const elem = self.buffer[self.head];
 
-        buffer: [size]T,
-        head: usize,
+        self.head = (self.head + 1) % size;
 
-        pub fn init() Self {
-            var self = Self{
-                .buffer = undefined,
-                .head = 0,
-            };
-
-            for (std.meta.tags(T), 0..) |tag, idx| {
-                self.buffer[idx] = tag;
-            }
-
-            return self;
-        }
-
-        pub fn read(self: *Self) T {
-            const elem = self.buffer[self.head];
-
-            self.head = (self.head + 1) % size;
-
-            return elem;
-        }
-    };
-}
+        return elem;
+    }
+};
 
 const ValueStore = struct {
+    const Self = @This();
+
     map: std.AutoHashMap(ir.Step, Location),
-    static_list: std.ArrayList(StaticRegister),
-    temp_queue: CircularBuffer(TempRegister),
-    temp_steps: std.AutoHashMap(TempRegister, ir.Step),
+    static_list: std.ArrayList(Register),
+    temp_queue: CircularBuffer,
+    temp_steps: std.AutoHashMap(Register, ir.Step),
     consts: std.AutoHashMap(ir.Step, []const u8),
     allocator: mem.Allocator,
     writer: *std.ArrayList(u8).Writer,
     offset: i32 = 0,
 
-    pub fn init(allocator: mem.Allocator, writer: anytype) !ValueStore {
-        var value_store = ValueStore{
+    pub fn init(allocator: mem.Allocator, writer: anytype) !Self {
+        var value_store = Self{
             .map = std.AutoHashMap(ir.Step, Location).init(allocator),
-            .static_list = std.ArrayList(StaticRegister).init(allocator),
-            .temp_queue = CircularBuffer(TempRegister).init(),
-            .temp_steps = std.AutoHashMap(TempRegister, ir.Step).init(allocator),
+            .static_list = std.ArrayList(Register).init(allocator),
+            .temp_queue = CircularBuffer.init(),
+            .temp_steps = std.AutoHashMap(Register, ir.Step).init(allocator),
             .consts = std.AutoHashMap(ir.Step, []const u8).init(allocator),
             .allocator = allocator,
             .writer = writer,
         };
 
-        try value_store.static_list.appendSlice(std.meta.tags(StaticRegister));
+        inline for (meta.tags(Register)) |tag| if (tag.is_static()) {
+            try value_store.static_list.append(tag);
+        };
 
         return value_store;
     }
 
     pub const Location = union(enum) {
-        Temp: TempRegister,
-        Static: StaticRegister,
+        Temp: Register,
+        Static: Register,
         Stack: i32,
     };
 
-    // guarantees that the value(s) are still accessable at all times
-    // value should be in little endian
-    pub fn write_value_static(self: *ValueStore, step: ir.Step, value: [4]u8) !void {
-        if (self.static_list.pop()) |reg| {
-            const loc = Location{ .Static = reg };
+    pub const SourceValue = union(enum) {
+        Immediate: u32,
+        Variable: ir.Step,
+    };
 
-            try write_value_to_reg(reg.to_generic(), value, self.writer);
-
-            try self.map.put(step, loc);
-        } else {
-            const loc = Location{
-                .Stack = -self.offset,
-            };
-
-            self.offset += 4;
-
-            try push_to_stack(value, self.writer);
-
-            try self.map.put(step, loc);
-        }
-    }
-
-    fn push_to_stack(value: [4]u8, writer: anytype) !void {
-        std.log.debug("push {x}", .{std.mem.bytesToValue(u32, &value)});
-
-        try writer.writeByte(0x68);
-        try writer.writeAll(&value);
-    }
-
-    // no guarantee that the value is still stored after some time
-    // use for temp vars
-    // value should be in little endian
-    pub fn write_value_temp(self: *ValueStore, step: ir.Step, value: [4]u8) !void {
+    pub fn load_from_buffer(self: *Self, step: ir.Step, buffer_idx: u32, index: ir.Step, encoder: *Encoder) !void {
         const reg = self.temp_queue.read();
+        try encoder.mov_reg_from_mem(reg, .Rbp, buffer_idx * 8);
 
-        if (self.temp_steps.get(reg)) |prev| {
-            _ = self.temp_steps.remove(reg);
-            _ = self.map.remove(prev);
-        }
+        const index_reg = try (self.peek(index) orelse error.InvalidIndex);
+        try encoder.mov_reg_from_mem_sib(reg, reg, index_reg, 0b11);
 
         const loc = Location{ .Temp = reg };
-
-        try write_value_to_reg(reg.to_generic(), value, self.writer);
-
         try self.map.put(step, loc);
-    }
-
-    fn write_value_to_reg(reg: Register, value: [4]u8, writer: anytype) !void {
-        if (mem.bytesToValue(u32, &value) == 0) {
-            std.log.debug("xor {s}, {s}", .{ @tagName(reg), @tagName(reg) });
-
-            switch (reg) {
-                .Rax, .Rcx, .Rdx, .Rdi, .Rsi => try writer.writeByte(0x48),
-                .R8, .R9, .R10, .R11 => try writer.writeByte(0x4d),
-                .Rsp, .Rbp => unreachable,
-            }
-
-            try writer.writeByte(0x31);
-
-            switch (reg) {
-                .Rax => try writer.writeByte(0xc0),
-                .Rcx => try writer.writeByte(0xc9),
-                .Rdx => try writer.writeByte(0xd2),
-                .Rdi => try writer.writeByte(0xff),
-                .Rsi => try writer.writeByte(0xf6),
-                .R8 => try writer.writeByte(0xc0),
-                .R9 => try writer.writeByte(0xc9),
-                .R10 => try writer.writeByte(0xd2),
-                .R11 => try writer.writeByte(0xdb),
-                .Rsp, .Rbp => unreachable,
-            }
-        } else {
-            std.log.debug("mov {s}, {x}", .{ @tagName(reg), std.mem.bytesToValue(u32, &value) });
-
-            switch (reg) {
-                .Rax, .Rcx, .Rdx, .Rdi, .Rsi => try writer.writeByte(0x48),
-                .R8, .R9, .R10, .R11 => try writer.writeByte(0x49),
-                .Rsp, .Rbp => unreachable,
-            }
-
-            try writer.writeByte(0xc7);
-
-            switch (reg) {
-                .Rax => try writer.writeByte(0xc0),
-                .Rcx => try writer.writeByte(0xc1),
-                .Rdx => try writer.writeByte(0xc2),
-                .Rdi => try writer.writeByte(0xc7),
-                .Rsi => try writer.writeByte(0xc6),
-                .R8 => try writer.writeByte(0xc0),
-                .R9 => try writer.writeByte(0xc1),
-                .R10 => try writer.writeByte(0xc2),
-                .R11 => try writer.writeByte(0xc3),
-                .Rsp, .Rbp => unreachable,
-            }
-
-            try writer.writeAll(&value);
-        }
-    }
-
-    // loads 4 bytes from a buffer
-    // stores value in a temporary register
-    pub fn load_from_buffer(self: *ValueStore, step: ir.Step, buffer_idx: usize, index: ir.Step) !void {
-        const reg = self.temp_queue.read();
-
-        const offset: usize = buffer_idx * 8;
-        const bytes = std.mem.toBytes(offset)[0..4];
-
-        try load_value_from_register(reg.to_generic(), .Rbp, bytes.*, self.writer);
-
-        if (self.map.get(index)) |loc| {
-            const index_reg = switch (loc) {
-                .Temp => |index_reg| index_reg.to_generic(),
-                .Static => |index_reg| index_reg.to_generic(),
-                .Stack => |_| {
-                    std.debug.panic("load_from_buffer: stack offset not implemented", .{});
-                },
-            };
-
-            try load_value_from_register_register_offset(reg.to_generic(), reg.to_generic(), index_reg, self.writer);
-        }
-
-        const loc = Location{ .Temp = reg };
-
-        try self.map.put(step, loc);
-
         try self.temp_steps.put(reg, step);
     }
 
-    fn load_value_from_register(dest: Register, source: Register, idx: [4]u8, writer: anytype) !void {
-        std.log.debug("mov {s}, qword ptr [{s} + 0x{x}]", .{ @tagName(dest), @tagName(source), std.mem.bytesToValue(u32, &idx) });
-
-        if (rex_prefix(dest, source, null)) |prefix| {
-            try writer.writeByte(prefix);
-        }
-
-        // op code
-        try writer.writeByte(0x8b);
-
-        try writer.writeByte(modrm(dest, source, .{ .displacement = .Word }));
-
-        // SIB byte for [RSP] with no index
-        // TODO: refuse to believe this is correct
-        if (source == .Rsp) {
-            try writer.writeByte(0x24);
-        }
-
-        try writer.writeAll(&idx);
+    pub fn write_const(self: *Self, step: ir.Step, value: []u8) !void {
+        try self.consts.put(step, value);
     }
 
-    fn load_value_from_register_register_offset(dest: Register, source: Register, offset: Register, writer: anytype) !void {
-        std.log.debug("mov {s}, qword ptr [{s} + {s} * 8]", .{ @tagName(dest), @tagName(source), @tagName(offset) });
+    pub fn assign_static(self: *Self, step_dest: ir.Step, source: SourceValue, encoder: *Encoder) !void {
+        const loc_dest = try self.alloc_static_location(step_dest);
 
-        if (rex_prefix(dest, source, null)) |prefix| {
-            try writer.writeByte(prefix);
+        switch (loc_dest) {
+            .Static => |reg| switch (source) {
+                .Immediate => |value| try encoder.mov_reg_imm32(reg, value),
+                .Variable => |step_source| if (self.consts.get(step_source)) |bytes| {
+                    try encoder.mov_reg_imm32(reg, mem.bytesToValue(u32, bytes));
+                } else {
+                    try encoder.push_reg(try self.ensure_in_register(step_source, encoder));
+                },
+            },
+            .Stack => |_| switch (source) {
+                .Immediate => |value| try encoder.push_imm32(value),
+                .Variable => |step_source| if (self.consts.get(step_source)) |bytes| {
+                    try encoder.push_imm32(mem.bytesToValue(u32, bytes));
+                } else {
+                    try encoder.push_reg(try self.ensure_in_register(step_source, encoder));
+                },
+            },
+            .Temp => unreachable,
+        }
+    }
+
+    pub fn cmp(self: *Self, dest: ir.Step, source: ir.Step, encoder: *Encoder) !void {
+        const reg_dest = self.peek(dest) orelse {
+            // only support comparing const and reg or reg and reg
+            assert(self.map.contains(source));
+            return self.cmp(source, dest, encoder);
+        };
+
+        if (self.peek(source)) |reg_src| {
+            try encoder.cmp_reg_reg(reg_dest, reg_src);
+        } else if (self.consts.get(source)) |const_value| {
+            try encoder.cmp_reg_imm32(reg_dest, mem.bytesToValue(u32, const_value));
+        }
+    }
+
+    pub fn alu(self: *Self, step: ir.Step, op: meta.fieldInfo(ir.Ops.Arg, .ALU).type, lhs: ir.Step, rhs: ir.Step, encoder: *Encoder) !void {
+        const lhs_reg = try self.ensure_in_register(lhs, encoder);
+        const rhs_reg = try self.ensure_in_register(rhs, encoder);
+
+        const reg_result = self.temp_queue.read();
+
+        try encoder.mov_reg_reg(reg_result, lhs_reg);
+
+        switch (op) {
+            .Add => try encoder.add_reg_reg(reg_result, rhs_reg),
+            .Mul => try encoder.imul_reg_reg(reg_result, rhs_reg),
+            else => @panic("Unsupported ALU operation"),
         }
 
-        // op code
-        try writer.writeByte(0x8b);
+        const loc = Location{ .Temp = reg_result };
+        try self.map.put(step, loc);
+        try self.temp_steps.put(reg_result, step);
+    }
+
+    fn peek(self: *const Self, step: ir.Step) ?Register {
+        return if (self.map.get(step)) |loc| switch (loc) {
+            .Temp => |reg| reg,
+            .Static => |reg| reg,
+            .Stack => |_| null,
+        } else null;
+    }
+
+    fn ensure_in_register(self: *Self, step: ir.Step, encoder: *Encoder) !Register {
+        return self.peek(step) orelse if (self.consts.get(step)) |value|
+            try self.alloc_temp(step, mem.bytesToValue(u32, value), encoder)
+        else
+            @panic("Failed to get register");
+    }
+
+    fn alloc_temp(self: *Self, step: ir.Step, value: u32, encoder: *Encoder) !Register {
+        const reg = self.temp_queue.read();
+
+        if (self.temp_steps.get(reg)) |previous_step_using_this_reg| {
+            _ = self.temp_steps.remove(reg);
+            _ = self.map.remove(previous_step_using_this_reg);
+        }
+
+        const new_loc = Location{ .Temp = reg };
+        try encoder.mov_reg_imm32(reg, value);
+        try self.map.put(step, new_loc);
+        try self.temp_steps.put(reg, step);
+
+        return reg;
+    }
+
+    fn alloc_static_location(self: *Self, step: ir.Step) !Location {
+        if (self.static_list.pop()) |reg| {
+            const loc = Location{ .Static = reg };
+            try self.map.put(step, loc);
+            return loc;
+        } else {
+            self.offset += 4;
+            const loc = Location{ .Stack = -self.offset };
+            try self.map.put(step, loc);
+            return loc;
+        }
+    }
+
+    pub fn store(self: *Self, buffer_idx: u32, step_index: ir.Step, step_value: ir.Step, encoder: *Encoder) !void {
+        const reg_base = self.temp_queue.read();
+
+        try encoder.mov_reg_from_mem(reg_base, .Rbp, buffer_idx * 8);
+
+        const reg_index = self.peek(step_index) orelse
+            if (self.consts.get(step_index)) |value|
+                try self.alloc_temp(step_index, mem.bytesToValue(u32, value), encoder)
+            else
+                @panic("Failed to get index register");
+
+        const reg_value = self.peek(step_value) orelse
+            if (self.consts.get(step_value)) |value|
+                try self.alloc_temp(step_value, mem.bytesToValue(u32, value), encoder)
+            else
+                @panic("Failed to get value register");
+
+        try encoder.mov_mem_sib_from_reg(reg_base, reg_index, reg_value, 0b11);
+    }
+
+    pub fn update(self: *Self, step_variable: ir.Step, step_value: ir.Step, encoder: *Encoder) !void {
+        const reg_variable = self.peek(step_variable) orelse @panic("Variable must be a non const register");
+
+        if (self.peek(step_value)) |reg_value| {
+            try encoder.mov_reg_reg(reg_variable, reg_value);
+        } else if (self.consts.get(step_value)) |value| {
+            try encoder.mov_reg_imm32(reg_variable, mem.bytesToValue(u32, value));
+        }
+    }
+};
+
+const Encoder = struct {
+    const Self = @This();
+
+    writer: *std.ArrayList(u8).Writer,
+
+    // Prefixes
+    const REX_W = 0x48; // 64-bit operand size prefix
+
+    // Control Flow
+    const JLE_SHORT = 0x7e;
+    const JL_SHORT = 0x7c;
+    const RET = 0xc3;
+
+    // Stack
+    const PUSH_RBP = 0x55;
+    const POP_RBP = 0x5d;
+    const PUSH_IMM32 = 0x68;
+
+    // Data Movement
+    const MOV_REG_REG = 0x89; // Move register to register/memory
+    const MOV_REG_FROM_MEM = 0x8b; // Move memory to register
+    const MOV_REG_IMM = 0xc7; // Move immediate to register
+
+    // Arithmetic & Logic
+    const ADD_REG_REG = 0x01; // ADD r/m64, r64
+    const IMUL_REG_REG = 0x0f_af; // IMUL r64, r/m64
+    const XOR_REG_REG = 0x31; // XOR r/m64, r64
+    const INC_REG = 0xff; // INC r/m64
+    const CMP_REG_REG = 0x39; // CMP r/m64, r64
+    const CMP_REG_IMM = 0x81; // CMP r/m64, imm32
+    const CMP_RAX_IMM = 0x3d; // CMP RAX, imm32
+
+    pub fn init(writer: *std.ArrayList(u8).Writer) Self {
+        return Self{ .writer = writer };
+    }
+
+    pub fn prologue(self: *Self) !void {
+        std.log.debug("push rbp", .{});
+        try self.writer.writeByte(PUSH_RBP);
+        std.log.debug("mov rbp, rdi", .{});
+        // 0xfd is modrm for mov rbp, rdi
+        try self.writer.writeAll(&[_]u8{ REX_W, MOV_REG_REG, 0xfd });
+    }
+
+    pub fn epilogue(self: *Self) !void {
+        std.log.debug("pop rbp", .{});
+        try self.writer.writeByte(POP_RBP);
+        std.log.debug("ret", .{});
+        try self.writer.writeByte(RET);
+    }
+
+    pub fn mov_reg_imm32(self: *Self, dest: Register, value: u32) !void {
+        if (value == 0) {
+            std.log.debug("xor {s}, {s}", .{ @tagName(dest), @tagName(dest) });
+            try self.emit_rex(.{ .reg = dest, .rm = dest });
+            try self.writer.writeByte(XOR_REG_REG);
+            try self.writer.writeByte(modrm(dest, dest, .{ .register = {} }));
+            return;
+        }
+
+        std.log.debug("mov {s}, {x}", .{ @tagName(dest), value });
+        try self.emit_rex(.{ .rm = dest });
+        try self.writer.writeByte(MOV_REG_IMM);
+
+        // ModR/M: Mod=11 (reg), R/M=dest, Reg=0 (opcode extension)
+        const modrm_byte = (@as(u8, 0b11) << 6) | (0b000 << 3) | dest.reg_encoding();
+        try self.writer.writeByte(modrm_byte);
+        try self.writer.writeInt(u32, value, std.builtin.Endian.little);
+    }
+
+    pub fn mov_reg_reg(self: *Self, dest: Register, src: Register) !void {
+        std.log.debug("mov {s}, {s}", .{ @tagName(dest), @tagName(src) });
+
+        try self.emit_rex(.{ .reg = src, .rm = dest });
+        try self.writer.writeByte(MOV_REG_REG);
+        try self.writer.writeByte(modrm(src, dest, .{ .register = {} }));
+    }
+
+    pub fn push_imm32(self: *Self, value: u32) !void {
+        std.log.debug("push {x}", .{value});
+        try self.writer.writeByte(PUSH_IMM32);
+        try self.writer.writeInt(u32, value, .little);
+    }
+
+    pub fn mov_reg_from_mem(self: *Self, dest: Register, base: Register, disp: u32) !void {
+        std.log.debug("mov {s}, qword ptr [{s} + 0x{x}]", .{ @tagName(dest), @tagName(base), disp });
+        try self.emit_rex(.{ .reg = dest, .rm = base });
+        try self.writer.writeByte(MOV_REG_FROM_MEM);
+
+        // Assuming 32-bit displacement for simplicity
+        try self.writer.writeByte(modrm(dest, base, .{ .displacement = .Word }));
+
+        // SIB byte is needed if base register is RSP
+        if (base == .Rsp) {
+            try self.writer.writeByte(0x24);
+        }
+
+        try self.writer.writeInt(u32, disp, std.builtin.Endian.little);
+    }
+
+    pub fn mov_reg_from_mem_sib(self: *Self, dest: Register, base: Register, index: Register, comptime scale: u2) !void {
+        std.log.debug("mov {s}, qword ptr [{s} + {s} * {d}]", .{ @tagName(dest), @tagName(base), @tagName(index), 1 << scale });
+        try self.emit_rex(.{ .reg = dest, .rm = base, .index = index });
+        try self.writer.writeByte(MOV_REG_FROM_MEM);
 
         // ModR/M byte: Mod = 00 (no displacement), Reg = dest, R/M = 100 (SIB follows)
-        const modrm_sib: u8 = (@as(u8, @intCast(reg_encoding(dest))) << 3) | 0b100;
-        try writer.writeByte(modrm_sib);
+        const modrm_byte: u8 = (0b00 << 6) | (@as(u8, dest.reg_encoding()) << 3) | 0b100;
+        try self.writer.writeByte(modrm_byte);
 
-        // SIB byte: Scale = 0b00 (multiply index by 0), Index = offset, Base = source
-        const sib: u8 = (0b11 << 6) | (@as(u8, @intCast(reg_encoding(offset))) << 3) | reg_encoding(source);
-        try writer.writeByte(sib);
+        // SIB byte: Scale, Index, Base
+        const sib_byte: u8 = (@as(u8, scale) << 6) | (@as(u8, index.reg_encoding()) << 3) | base.reg_encoding();
+        try self.writer.writeByte(sib_byte);
     }
 
-    pub fn write_const(self: *ValueStore, step: ir.Step, value: [4]u8) !void {
-        const buffer = try self.allocator.dupe(u8, &value);
-        try self.consts.put(step, buffer);
+    pub fn mov_mem_sib_from_reg(self: *Self, base: Register, index: Register, src: Register, comptime scale: u2) !void {
+        std.log.debug("mov qword ptr [{s} + {s} * {d}], {s}", .{ @tagName(base), @tagName(index), 1 << scale, @tagName(src) });
+        try self.emit_rex(.{ .reg = src, .rm = base, .index = index });
+        try self.writer.writeByte(MOV_REG_REG); // Opcode is 0x89 for mem<-reg
+
+        // ModR/M byte: Mod = 00 (no displacement), Reg = src, R/M = 100 (SIB follows)
+        const modrm_byte = (0b00 << 6) | (@as(u8, src.reg_encoding()) << 3) | 0b100;
+        try self.writer.writeByte(modrm_byte);
+
+        // SIB byte: Scale, Index, Base
+        const sib_byte = (@as(u8, scale) << 6) | (@as(u8, index.reg_encoding()) << 3) | base.reg_encoding();
+        try self.writer.writeByte(sib_byte);
     }
 
-    pub fn copy_from_static(self: *ValueStore, dest: ir.Step, source: ir.Step) !void {
-        if (self.map.get(source)) |source_loc| {
-            if (self.static_list.pop()) |dest_reg| {
-                const loc = Location{ .Static = dest_reg };
-                try self.map.put(dest, loc);
-
-                switch (source_loc) {
-                    .Temp => |source_reg| {
-                        const empty = [_]u8{0} ** 4;
-                        try load_value_from_register(dest_reg.to_generic(), source_reg.to_generic(), empty, self.writer);
-                    },
-                    .Static => |source_reg| {
-                        const empty = [_]u8{0} ** 4;
-                        try load_value_from_register(dest_reg.to_generic(), source_reg.to_generic(), empty, self.writer);
-                    },
-                    .Stack => |offset| {
-                        // pop dest
-                        std.log.debug("pop {s}", .{@tagName(dest_reg)});
-                        _ = offset;
-                        std.debug.panic("copy_from_static: register from stack not implemented", .{});
-                    },
-                }
-            } else {
-                std.debug.panic("copy_from_static: stack from anything not implemented", .{});
-            }
-        } else {
-            if (self.consts.get(source)) |const_value| {
-                if (self.static_list.pop()) |dest_reg| {
-                    const loc = Location{ .Static = dest_reg };
-                    try self.map.put(dest, loc);
-
-                    const value: [4]u8 = const_value.ptr[0..4].*;
-                    try write_value_to_reg(dest_reg.to_generic(), value, self.writer);
-                } else {
-                    const loc = Location{
-                        .Stack = -self.offset,
-                    };
-
-                    self.offset += 4;
-
-                    const value: [4]u8 = const_value.ptr[0..4].*;
-                    try push_to_stack(value, self.writer);
-
-                    try self.map.put(dest, loc);
-                }
-            } else {
-                std.debug.panic("copy_from_static: source is a deallocated temp value", .{});
-            }
-        }
-    }
-
-    pub fn inc(self: *ValueStore, step: ir.Step) !void {
-        if (self.map.get(step)) |loc| {
-            switch (loc) {
-                .Temp => |reg| {
-                    try inc_register(reg.to_generic(), self.writer);
-                },
-                .Static => |reg| {
-                    try inc_register(reg.to_generic(), self.writer);
-                },
-                .Stack => |offset| {
-                    // pop dest
-                    _ = offset;
-                    std.debug.panic("inc: stack inc not implemented", .{});
-                },
-            }
-        } else {
-            if (self.consts.get(step)) |_| {
-                std.debug.panic("inc: cannot inc on a const value", .{});
-            } else {
-                std.debug.panic("inc: source is a deallocated temp value", .{});
-            }
-        }
-    }
-
-    fn inc_register(reg: Register, writer: anytype) !void {
+    pub fn inc_reg(self: *Self, reg: Register) !void {
         std.log.debug("inc {s}", .{@tagName(reg)});
-        switch (reg) {
-            .Rax, .Rcx, .Rdx, .Rdi, .Rsi => try writer.writeByte(0x48),
-            .R8, .R9, .R10, .R11 => try writer.writeByte(0x4d),
-            .Rsp, .Rbp => unreachable,
-        }
+        try self.emit_rex(.{ .rm = reg });
+        try self.writer.writeByte(INC_REG);
 
-        try writer.writeByte(0xff);
-
-        const modrm_inc: u8 = @as(u8, 0b11_000_000) | reg_encoding(reg);
-        try writer.writeByte(modrm_inc);
+        const modrm_inc: u8 = @as(u8, 0b11_000_000) | reg.reg_encoding();
+        try self.writer.writeByte(modrm_inc);
     }
 
-    pub fn cmp(self: *ValueStore, dest: ir.Step, source: ir.Step) !void {
-        const dest_reg = if (self.map.get(dest)) |loc| blk: {
-            switch (loc) {
-                .Temp => |reg| {
-                    break :blk reg.to_generic();
-                },
-                .Static => |reg| {
-                    break :blk reg.to_generic();
-                },
-                .Stack => |offset| {
-                    _ = offset;
-                    std.debug.panic("cmp: register and stack comparison not implemented", .{});
-                },
-            }
+    pub fn cmp_reg_imm32(self: *Self, reg: Register, value: u32) !void {
+        std.log.debug("cmp {s}, {x}", .{ @tagName(reg), value });
+        try self.emit_rex(.{ .rm = reg });
+
+        // Special shorter encoding for comparing with RAX
+        if (reg == .Rax) {
+            try self.writer.writeByte(CMP_RAX_IMM);
         } else {
-            // TODO: we can just swap it?
-            if (self.consts.get(source)) |_| {
-                std.debug.panic("cmp: const and register comparison not allowed", .{});
-            } else {
-                std.debug.panic("cmp: source is a deallocated temp value", .{});
+            try self.writer.writeByte(CMP_REG_IMM);
+            // ModR/M: Mod=11 (reg), R/M=reg, Reg=7 (opcode extension)
+            const modrm_byte = (@as(u8, 0b11) << 6) | (0b111 << 3) | reg.reg_encoding();
+            try self.writer.writeByte(modrm_byte);
+        }
+
+        try self.writer.writeInt(u32, value, .little);
+    }
+
+    pub fn cmp_reg_reg(self: *Self, reg1: Register, reg2: Register) !void {
+        std.log.debug("cmp {s}, {s}", .{ @tagName(reg1), @tagName(reg2) });
+        try self.emit_rex(.{ .reg = reg2, .rm = reg1 });
+        try self.writer.writeByte(CMP_REG_REG);
+        try self.writer.writeByte(modrm(reg2, reg1, .{ .register = {} }));
+    }
+
+    pub fn add_reg_reg(self: *Self, dest: Register, src: Register) !void {
+        std.log.debug("add {s}, {s}", .{ @tagName(dest), @tagName(src) });
+        try self.emit_rex(.{ .reg = dest, .rm = src });
+        try self.writer.writeByte(ADD_REG_REG);
+        try self.writer.writeByte(modrm(src, dest, .{ .register = {} }));
+    }
+
+    pub fn imul_reg_reg(self: *Self, dest: Register, src: Register) !void {
+        std.log.debug("imul {s}, {s}", .{ @tagName(dest), @tagName(src) });
+        try self.emit_rex(.{ .reg = dest, .rm = src });
+        try self.writer.writeInt(u16, IMUL_REG_REG, .big);
+        try self.writer.writeByte(modrm(dest, src, .{ .register = {} }));
+    }
+
+    pub fn jl_short(self: *Self, offset: i8) !void {
+        std.log.debug("jl {d}", .{offset});
+        try self.writer.writeByte(JL_SHORT);
+        try self.writer.writeInt(i8, offset, .little);
+    }
+
+    pub fn push_reg(self: *Self, reg: Register) !void {
+        std.log.debug("push {s}", .{@tagName(reg)});
+
+        if (reg.is_extended()) {
+            try self.writer.writeByte(0x41);
+        }
+        try self.writer.writeByte(0x50 + @as(u8, reg.reg_encoding()));
+    }
+
+    const RexOperands = struct {
+        reg: ?Register = null,
+        rm: ?Register = null,
+        index: ?Register = null,
+        is_64bit: bool = true,
+    };
+
+    fn emit_rex(self: *Self, ops: RexOperands) !void {
+        var prefix: u8 = 0b01000000;
+        var needs_emit: bool = false;
+
+        if (ops.is_64bit) {
+            prefix |= 0b1000;
+            needs_emit = true;
+        }
+        if (ops.reg) |r| {
+            if (r.is_extended()) {
+                prefix |= 0b0100; // REX.R
+                needs_emit = true;
             }
-        };
-
-        const source_reg = if (self.map.get(source)) |loc| blk: {
-            switch (loc) {
-                .Temp => |reg| {
-                    break :blk reg.to_generic();
-                },
-                .Static => |reg| {
-                    break :blk reg.to_generic();
-                },
-                .Stack => |offset| {
-                    _ = offset;
-                    std.debug.panic("cmp: register and stack comparison not implemented", .{});
-                },
+        }
+        if (ops.rm) |r| {
+            if (r.is_extended()) {
+                prefix |= 0b0001; // REX.B
+                needs_emit = true;
             }
-        } else {
-            if (self.consts.get(source)) |const_value| {
-                const value: [4]u8 = const_value.ptr[0..4].*;
-                try cmp_register_with_const(dest_reg, value, self.writer);
-                return;
-            } else {
-                std.debug.panic("cmp: source is a deallocated temp value", .{});
+        }
+        if (ops.index) |r| {
+            if (r.is_extended()) {
+                prefix |= 0b0010; // REX.X
+                needs_emit = true;
             }
-        };
-
-        try cmp_registers(dest_reg, source_reg, self.writer);
-    }
-
-    fn cmp_registers(dest: Register, source: Register, writer: anytype) !void {
-        std.log.debug("cmp {s}, {s}", .{ @tagName(dest), @tagName(source) });
-
-        _ = writer;
-
-        std.log.debug("{x}", .{modrm(dest, source, .{ .displacement = .Byte })});
-    }
-
-    fn cmp_register_with_const(reg: Register, value: [4]u8, writer: anytype) !void {
-        std.log.debug("cmp {s}, {x}", .{ @tagName(reg), std.mem.bytesToValue(u32, &value) });
-
-        switch (reg) {
-            .Rax, .Rcx, .Rdx, .Rdi, .Rsi => try writer.writeByte(0x48),
-            .R8, .R9, .R10, .R11 => try writer.writeByte(0x4d),
-            .Rsp, .Rbp => unreachable,
         }
 
-        if (reg != .Rax) {
-            try writer.writeByte(0x81);
+        if (needs_emit) {
+            try self.writer.writeByte(prefix);
         }
-
-        switch (reg) {
-            .Rax => try writer.writeByte(0x3d),
-            .Rcx => try writer.writeByte(0xf9),
-            .Rdx => try writer.writeByte(0xfa),
-            .Rdi => try writer.writeByte(0xff),
-            .Rsi => try writer.writeByte(0xfe),
-            .R8 => try writer.writeByte(0xf8),
-            .R9 => try writer.writeByte(0xf9),
-            .R10 => try writer.writeByte(0xfa),
-            .R11 => try writer.writeByte(0xfb),
-            .Rsp, .Rbp => unreachable,
-        }
-
-        try writer.writeAll(&value);
     }
 
-    pub fn alu(self: *ValueStore, step: ir.Step, op: std.meta.fieldInfo(ir.Ops.Arg, .ALU).type, lhs: ir.Step, rhs: ir.Step) !void {
-        const lhs_reg = self.get_register(lhs) catch |err| {
-            std.debug.panic("Could not get lhs register: {}", .{err});
-        };
+    const ModRMOptions = union(enum) {
+        displacement: enum {
+            None,
+            Byte,
+            Word,
+        },
+        register: void,
 
-        const rhs_reg = self.get_register(rhs) catch |err| {
-            std.debug.panic("Could not get rhs register: {}", .{err});
-        };
-
-        const result_reg = self.temp_queue.read();
-
-        try copy(result_reg.to_generic(), lhs_reg, self.writer);
-
-        try alu_op(op, result_reg.to_generic(), rhs_reg, self.writer);
-
-        const loc = Location{ .Temp = result_reg };
-        try self.map.put(step, loc);
-        try self.temp_steps.put(result_reg, step);
-    }
-
-    fn alu_op(op: std.meta.fieldInfo(ir.Ops.Arg, .ALU).type, lhs: Register, rhs: Register, writer: anytype) !void {
-        std.log.debug("{s} {s}, {s}", .{ @tagName(op), @tagName(lhs), @tagName(rhs) });
-
-        if (rex_prefix(rhs, lhs, null)) |prefix| {
-            try writer.writeByte(prefix);
-        }
-
-        // use imul and idiv
-        // care for clobbering, will prolly need to refactor some stuff
-        // TODO: clobbering
-        const opcode: []const u8 = switch (op) {
-            .Add => ([_]u8{0x01})[0..], // ADD
-            .Mul => ([_]u8{ 0x0F, 0xaf })[0..], // IMUL
-            else => {
-                std.debug.panic("Unsupported ALU operation", .{});
-            },
-        };
-        try writer.writeAll(opcode);
-
-        const modrm_byte = switch (op) {
-            .Add => modrm(rhs, lhs, .{ .register = {} }),
-            .Mul => modrm(lhs, rhs, .{ .register = {} }), // imul swaps, idk why but its annoying
-            else => {
-                std.debug.panic("Unsupported ALU operation", .{});
-            },
-        };
-        try writer.writeByte(modrm_byte);
-    }
-
-    fn copy(dest: Register, source: Register, writer: anytype) !void {
-        std.log.debug("mov {s}, {s}", .{ @tagName(dest), @tagName(source) });
-
-        if (rex_prefix(source, dest, null)) |prefix| {
-            try writer.writeByte(prefix);
-        }
-
-        try writer.writeByte(0x89);
-
-        // Mod = 11 (register-to-register)
-        const modrm_byte = modrm(source, dest, .{ .register = {} });
-        try writer.writeByte(modrm_byte);
-    }
-
-    fn get_register(self: *ValueStore, step: ir.Step) !Register {
-        if (self.map.get(step)) |loc| {
-            return switch (loc) {
-                .Temp => |reg| reg.to_generic(),
-                .Static => |reg| reg.to_generic(),
-                .Stack => |_| {
-                    std.debug.panic("get_register: unimplemented stack storage, should pop into temp reg", .{});
+        pub fn value(self: ModRMOptions) u2 {
+            return switch (self) {
+                .displacement => |displacement| switch (displacement) {
+                    .None => 0b00,
+                    .Byte => 0b01,
+                    .Word => 0b10,
                 },
+                .register => 0b11,
             };
-        } else if (self.consts.get(step)) |value| {
-            try self.write_value_temp(step, value[0..4].*);
-            return self.get_register(step);
-        } else {
-            return error.DeallocatedTempRegister;
         }
-    }
+    };
 
-    pub fn store(self: *ValueStore, buffer_idx: usize, index: ir.Step, value: ir.Step) !void {
-        const reg_base = self.temp_queue.read();
-        const offset = buffer_idx * 8;
-        const bytes = std.mem.toBytes(offset)[0..4];
+    fn modrm(dest: Register, source: Register, options: ModRMOptions) u8 {
+        const mod: u8 = options.value();
 
-        try load_value_from_register(reg_base.to_generic(), .Rbp, bytes.*, self.writer);
+        const reg: u8 = dest.reg_encoding();
 
-        const index_reg = self.get_register(index) catch |err| {
-            std.debug.panic("Failed to get index register: {}", .{err});
-        };
+        const rm: u8 = source.reg_encoding();
 
-        const value_reg = self.get_register(value) catch |err| {
-            std.debug.panic("Failed to get value register: {}", .{err});
-        };
-
-        try store_value_to_memory_with_offset(reg_base.to_generic(), index_reg, value_reg, self.writer);
-    }
-
-    fn store_value_to_memory_with_offset(dest: Register, index: Register, value: Register, writer: anytype) !void {
-        std.log.debug("mov qword ptr [{s} + {s} * 8], {s}", .{ @tagName(dest), @tagName(index), @tagName(value) });
-
-        if (rex_prefix(value, dest, index)) |prefix| {
-            try writer.writeByte(prefix);
-        }
-
-        try writer.writeByte(0x89);
-
-        // Write the ModR/M byte: Mod = 00 (memory), Reg = value, R/M = 100 (SIB follows)
-        const modrm_byte = (0b00 << 6) | (@as(u8, @intCast(reg_encoding(value))) << 3) | 0b100;
-        try writer.writeByte(modrm_byte);
-
-        // Write the SIB byte: Scale = 0b00 (no scaling), Index = index, Base = base
-        const sib_byte = (0b11 << 6) | (@as(u8, @intCast(reg_encoding(index))) << 3) | reg_encoding(dest);
-        try writer.writeByte(sib_byte);
-    }
-
-    pub fn update(self: *ValueStore, variable: ir.Step, value: ir.Step) !void {
-        const var_reg = self.get_register(variable) catch |err| {
-            std.debug.panic("Failed to get var register: {}", .{err});
-        };
-
-        const value_reg = self.get_register(value) catch |err| {
-            std.debug.panic("Failed to get value register: {}", .{err});
-        };
-
-        try copy(var_reg, value_reg, self.writer);
+        return mod << 6 | reg << 3 | rm;
     }
 };
 
@@ -738,6 +556,7 @@ pub fn generate_kernel(allocator: mem.Allocator, block: *const ir.Block) ![]cons
     var writer = code.writer();
     var store = try ValueStore.init(allocator, &writer);
     var labels = std.AutoHashMap(ir.Step, usize).init(allocator);
+    var encoder = Encoder.init(&writer);
 
     var ctx = Context{
         .block = block,
@@ -746,6 +565,7 @@ pub fn generate_kernel(allocator: mem.Allocator, block: *const ir.Block) ![]cons
         .writer = &writer,
         .store = &store,
         .labels = &labels,
+        .encoder = &encoder,
     };
 
     try generate_prologue(&ctx);
@@ -778,35 +598,23 @@ fn generate_node(ctx: *Context) !void {
 }
 
 fn generate_define_acc(node: ir.Node, ctx: *Context) !void {
-    var value = [_]u8{0} ** 4;
+    const value = try fmt.parseInt(u32, node.arg.DEFINE_ACC, 10);
 
-    try value_to_4_bytes(node.dtype.?, &value, node.arg.DEFINE_ACC);
-
-    try ctx.store.write_value_static(node.step, value);
+    try ctx.store.assign_static(node.step, .{ .Immediate = value }, ctx.encoder);
 }
 
-fn value_to_4_bytes(dtype: ir.DataTypes, dest: *[4]u8, source: []const u8) !void {
-    switch (dtype) {
-        .Int => {
-            const T = i32;
-            const int = try fmt.parseInt(T, source, 10);
-            const int_little = std.mem.nativeToLittle(T, int);
-            const bytes = std.mem.toBytes(int_little)[0..4];
-            @memcpy(dest, bytes);
-        },
-        .Float => {
-            const T = f32;
-            const float = try fmt.parseFloat(T, source);
-            const float_little = std.mem.nativeToLittle(T, float);
-            const bytes = std.mem.toBytes(float_little)[0..4];
-            @memcpy(dest, bytes);
-        },
+inline fn value_to_4_bytes(dtype: ir.DataTypes, dest: *[]u8, source: []const u8) !void {
+    const bytes = switch (dtype) {
+        .Int => mem.toBytes(try fmt.parseInt(i32, source, 10)),
+        .Float => mem.toBytes(try fmt.parseFloat(f32, source)),
         else => unreachable,
-    }
+    };
+
+    @memcpy(dest.*, bytes[0..4]);
 }
 
 fn generate_const(node: ir.Node, ctx: *Context) !void {
-    var value = [_]u8{0} ** 4;
+    var value = try ctx.store.allocator.alloc(u8, 4);
 
     try value_to_4_bytes(node.dtype.?, &value, node.arg.CONST);
 
@@ -817,7 +625,7 @@ fn generate_loop(node: ir.Node, ctx: *Context) !void {
     const start = node.inputs.?[0];
 
     // mov index, start
-    try ctx.store.copy_from_static(node.step, start);
+    try ctx.store.assign_static(node.step, .{ .Variable = start }, ctx.encoder);
 
     // label
     std.log.debug("label_{x}:", .{ctx.code.items.len});
@@ -830,28 +638,29 @@ fn generate_load(node: ir.Node, ctx: *Context) !void {
 
     const index = node.inputs.?[1];
 
-    try ctx.store.load_from_buffer(node.step, buffer_idx, index);
+    try ctx.store.load_from_buffer(node.step, buffer_idx, index, ctx.encoder);
 }
 
 fn generate_alu(node: ir.Node, ctx: *Context) !void {
-    try ctx.store.alu(node.step, node.arg.ALU, node.inputs.?[0], node.inputs.?[1]);
+    try ctx.store.alu(node.step, node.arg.ALU, node.inputs.?[0], node.inputs.?[1], ctx.encoder);
 }
 
 fn generate_update(node: ir.Node, ctx: *Context) !void {
     const variable = node.inputs.?[0];
     const value = node.inputs.?[1];
 
-    try ctx.store.update(variable, value);
+    try ctx.store.update(variable, value, ctx.encoder);
 }
 
 fn generate_endloop(node: ir.Node, ctx: *Context) !void {
     const index_step: ir.Step = node.inputs.?[0];
-    // inc index
-    try ctx.store.inc(index_step);
-    // cmp index, end
+
+    // inc
+    try if (ctx.store.peek(index_step)) |reg| ctx.encoder.inc_reg(reg);
+
     const end_step: ir.Step = ctx.block.nodes.items[node.inputs.?[0]].inputs.?[1];
-    try ctx.store.cmp(index_step, end_step);
-    // jle label
+    try ctx.store.cmp(index_step, end_step, ctx.encoder);
+
     const label = ctx.labels.get(index_step).?;
     const distance = ctx.code.items.len - label;
     assert(distance < 0xff);
@@ -866,19 +675,13 @@ fn generate_store(node: ir.Node, ctx: *Context) !void {
 
     const index = node.inputs.?[1];
     const value = node.inputs.?[2];
-    try ctx.store.store(buffer_idx, index, value);
+    try ctx.store.store(buffer_idx, index, value, ctx.encoder);
 }
 
 fn generate_prologue(ctx: *Context) !void {
-    std.log.debug("push Rbp", .{});
-    try ctx.writer.writeByte(0x55);
-    std.log.debug("mov Rbp, Rdi", .{});
-    try ctx.writer.writeAll(&[_]u8{ 0x48, 0x89, 0xfd });
+    try ctx.encoder.prologue();
 }
 
 fn generate_epilogue(ctx: *Context) !void {
-    std.log.debug("pop Rbp", .{});
-    try ctx.writer.writeByte(0x5d);
-    std.log.debug("ret", .{});
-    try ctx.writer.writeByte(0xc3);
+    try ctx.encoder.epilogue();
 }
