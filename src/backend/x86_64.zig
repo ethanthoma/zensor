@@ -481,7 +481,6 @@ const Encoder = struct {
 
 const Context = struct {
     block: *const ir.Block,
-    cursor: usize = 0,
     store: *Memory,
     labels: *std.AutoHashMap(ir.Step, usize),
     encoder: *Encoder,
@@ -494,7 +493,6 @@ pub fn generate_kernel(allocator: mem.Allocator, block: *const ir.Block) ![]cons
 
     var ctx = Context{
         .block = block,
-        .cursor = 0,
         .store = &store,
         .labels = &labels,
         .encoder = &encoder,
@@ -502,34 +500,23 @@ pub fn generate_kernel(allocator: mem.Allocator, block: *const ir.Block) ![]cons
 
     try generate_prologue(&ctx);
 
-    while (ctx.cursor < block.nodes.items.len) {
-        try generate_node(&ctx);
-    }
+    for (block.nodes.items) |node| switch (node.op) {
+        .DEFINE_GLOBAL => {},
+        .DEFINE_ACC => try generate_define_acc(node, &ctx),
+        .CONST => try generate_const(node, &ctx),
+        .LOOP => try generate_loop(node, &ctx),
+        .LOAD => try generate_load(node, &ctx),
+        .ALU => try generate_alu(node, &ctx),
+        .UPDATE => try generate_update(node, &ctx),
+        .ENDLOOP => try generate_endloop(node, &ctx),
+        .STORE => try generate_store(node, &ctx),
+    };
 
     try generate_epilogue(&ctx);
 
     return encoder.buffer.toOwnedSlice();
 }
 
-fn generate_node(ctx: *Context) !void {
-    const node = ctx.block.nodes.items[ctx.cursor];
-
-    switch (node.op) {
-        .DEFINE_GLOBAL => {},
-        .DEFINE_ACC => try generate_define_acc(node, ctx),
-        .CONST => try generate_const(node, ctx),
-        .LOOP => try generate_loop(node, ctx),
-        .LOAD => try generate_load(node, ctx),
-        .ALU => try generate_alu(node, ctx),
-        .UPDATE => try generate_update(node, ctx),
-        .ENDLOOP => try generate_endloop(node, ctx),
-        .STORE => try generate_store(node, ctx),
-    }
-
-    ctx.cursor += 1;
-}
-
-// TODO: I made everything an int but that isnt correct. Need to change IR to handle bytes directly
 fn generate_define_acc(node: ir.Node, ctx: *Context) !void {
     var value = [_]u8{0} ** 4;
     try value_to_4_bytes(node.dtype.?, &value, node.arg.DEFINE_ACC);
@@ -627,19 +614,21 @@ fn generate_endloop(node: ir.Node, ctx: *Context) !void {
 }
 
 fn generate_store(node: ir.Node, ctx: *Context) !void {
+    // load addr for storage buffer
     const buffer = ctx.block.nodes.items[node.inputs.?[0]];
     const buffer_idx = buffer.arg.DEFINE_GLOBAL.idx;
-
-    const step_index = node.inputs.?[1];
-    const step_value = node.inputs.?[2];
-
     const reg_base = ctx.store.temp_queue.read();
-
     try ctx.encoder.mov_reg_from_mem(reg_base, .Rdi, @intCast(buffer_idx * 8));
 
-    const reg_index = try ctx.store.read(step_index);
+    // load value
+    const step_value = node.inputs.?[2];
     const reg_value = try ctx.store.read(step_value);
 
+    // load index of buffer
+    const step_index = node.inputs.?[1];
+    const reg_index = try ctx.store.read(step_index);
+
+    // store value into addr + index
     try ctx.encoder.mov_mem_sib_from_reg(reg_base, reg_index, reg_value, 0b11);
 }
 
