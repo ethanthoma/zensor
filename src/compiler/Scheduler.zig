@@ -144,7 +144,7 @@ fn topological_sort(
     switch (node.input) {
         inline else => |*inputs| {
             const info = @typeInfo(@TypeOf(inputs));
-            if (info == .Pointer and @typeInfo(info.Pointer.child) == .Array) {
+            if (info == .pointer and @typeInfo(info.pointer.child) == .array) {
                 for (inputs) |*input| {
                     input.* = try self.topological_sort(input.*, context);
                 }
@@ -227,7 +227,7 @@ pub fn fetch_schedules(self: Scheduler, node: *ast.Node) ![]*Schedule {
         try todo.append(schedule);
 
         while (todo.items.len != 0) {
-            const current = todo.pop();
+            const current = todo.pop().?;
 
             for (current.dependencies) |dep| {
                 try todo.append(dep);

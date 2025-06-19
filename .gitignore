@@ -1,3 +1,29 @@
-.direnv/
-zig-out/
-.zig-cache/
+*
+
+# base
+!.gitignore
+!LICENSE
+!README.md
+
+# nix
+!flake.lock
+!flake.nix
+!shell.nix
+# normally this would be ignored but for devs this is nice to have
+!.envrc
+
+# zig
+!build.zig
+!build.zig.zon
+
+!src/
+!src/**/*
+
+!old_src/
+!old_src/**/*
+
+!examples/
+!examples/**/*
+
+!test/
+!test/**/*

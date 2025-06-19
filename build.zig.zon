@@ -1,5 +1,5 @@
 .{
-    .name = "zensor",
+    .name = .zensor,
     .version = "0.0.1",
     .minimum_zig_version = "0.14.0",
     .paths = .{
@@ -9,4 +9,5 @@
         "build.zig.zon",
         "README.md",
     },
+    .fingerprint = 0x9b894678c37abca5,
 }

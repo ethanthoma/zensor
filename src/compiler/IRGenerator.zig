@@ -137,7 +137,7 @@ fn process_node(node: *const ast.Node, block: *ir.Block, context: *Context) !voi
 }
 
 fn render_above_scope(block: *ir.Block, step: ir.Step, context: *Context) !ir.Step {
-    const loop_ctx = context.loops.pop();
+    const loop_ctx = context.loops.pop().?;
     const loop_index = loop_ctx.step;
 
     // remove step from original position
@@ -189,7 +189,7 @@ fn get_range(node: *const ast.Node) Range {
     switch (node.op) {
         inline else => |op| {
             const children = @field(node.input, @tagName(op));
-            if (@typeInfo(@TypeOf(children)) == .Array) {
+            if (@typeInfo(@TypeOf(children)) == .array) {
                 return .{
                     .start = 0,
                     .end = children[0].view.size,
