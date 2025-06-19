@@ -3,6 +3,7 @@ const mem = std.mem;
 const meta = std.meta;
 const fmt = std.fmt;
 const io = std.io;
+const log = std.log;
 const assert = std.debug.assert;
 
 const ir = @import("../compiler/ir.zig");
@@ -233,22 +234,22 @@ const Encoder = struct {
     }
 
     pub fn epilogue(self: *Self) !void {
-        std.log.debug("leave", .{});
+        log.debug("leave", .{});
         try self.buffer.writer().writeByte(LEAVE);
-        std.log.debug("ret", .{});
+        log.debug("ret", .{});
         try self.buffer.writer().writeByte(RET);
     }
 
     pub fn mov_reg_imm32(self: *Self, dest: Register, value: []const u8) !void {
         if (mem.bytesToValue(u32, value[0..4]) == 0) {
-            std.log.debug("xor {s}, {s}", .{ @tagName(dest), @tagName(dest) });
+            log.debug("xor {s}, {s}", .{ @tagName(dest), @tagName(dest) });
             try self.emit_rex(.{ .reg = dest, .rm = dest });
             try self.buffer.writer().writeByte(XOR_REG_REG);
             try self.buffer.writer().writeByte(modrm(dest, dest, .{ .register = {} }));
             return;
         }
 
-        std.log.debug("mov {s}, {x}", .{ @tagName(dest), value });
+        log.debug("mov {s}, {x}", .{ @tagName(dest), value });
         try self.emit_rex(.{ .rm = dest });
         try self.buffer.writer().writeByte(MOV_REG_IMM);
 
@@ -259,7 +260,7 @@ const Encoder = struct {
     }
 
     pub fn mov_reg_reg(self: *Self, dest: Register, src: Register) !void {
-        std.log.debug("mov {s}, {s}", .{ @tagName(dest), @tagName(src) });
+        log.debug("mov {s}, {s}", .{ @tagName(dest), @tagName(src) });
 
         try self.emit_rex(.{ .reg = src, .rm = dest });
         try self.buffer.writer().writeByte(MOV_REG_REG);
@@ -267,13 +268,13 @@ const Encoder = struct {
     }
 
     pub fn push_imm32(self: *Self, value: []const u8) !void {
-        std.log.debug("push {x}", .{value});
+        log.debug("push {x}", .{value});
         try self.buffer.writer().writeByte(PUSH_IMM32);
         try self.buffer.writer().writeAll(value[0..4]);
     }
 
     pub fn mov_reg_from_mem(self: *Self, dest: Register, base: Register, disp: i32) !void {
-        std.log.debug("mov {s}, qword ptr [{s} + 0x{x}]", .{ @tagName(dest), @tagName(base), disp });
+        log.debug("mov {s}, qword ptr [{s} + 0x{x}]", .{ @tagName(dest), @tagName(base), disp });
         try self.emit_rex(.{ .reg = dest, .rm = base });
         try self.buffer.writer().writeByte(MOV_REG_FROM_MEM);
 
@@ -285,11 +286,11 @@ const Encoder = struct {
             try self.buffer.writer().writeByte(0x24);
         }
 
-        try self.buffer.writer().writeInt(i32, disp, std.builtin.Endian.little);
+        try self.buffer.writer().writeInt(i32, disp, .little);
     }
 
     pub fn mov_reg_from_mem_sib(self: *Self, dest: Register, base: Register, index: Register, comptime scale: u2) !void {
-        std.log.debug("mov {s}, qword ptr [{s} + {s} * {d}]", .{ @tagName(dest), @tagName(base), @tagName(index), 1 << scale });
+        log.debug("mov {s}, qword ptr [{s} + {s} * {d}]", .{ @tagName(dest), @tagName(base), @tagName(index), 1 << scale });
         try self.emit_rex(.{ .reg = dest, .rm = base, .index = index });
         try self.buffer.writer().writeByte(MOV_REG_FROM_MEM);
 
@@ -303,7 +304,7 @@ const Encoder = struct {
     }
 
     pub fn mov_mem_from_reg(self: *Self, base: Register, disp: i32, src: Register) !void {
-        std.log.debug("mov qword ptr [{s} + 0x{x}], {s}", .{ @tagName(base), disp, @tagName(src) });
+        log.debug("mov qword ptr [{s} + 0x{x}], {s}", .{ @tagName(base), disp, @tagName(src) });
         try self.emit_rex(.{ .reg = src, .rm = base });
         try self.buffer.writer().writeByte(MOV_REG_REG);
 
@@ -318,7 +319,7 @@ const Encoder = struct {
     }
 
     pub fn mov_mem_sib_from_reg(self: *Self, base: Register, index: Register, src: Register, comptime scale: u2) !void {
-        std.log.debug("mov qword ptr [{s} + {s} * {d}], {s}", .{ @tagName(base), @tagName(index), 1 << scale, @tagName(src) });
+        log.debug("mov qword ptr [{s} + {s} * {d}], {s}", .{ @tagName(base), @tagName(index), 1 << scale, @tagName(src) });
         try self.emit_rex(.{ .reg = src, .rm = base, .index = index });
         try self.buffer.writer().writeByte(MOV_REG_REG); // Opcode is 0x89 for mem<-reg
 
@@ -332,7 +333,7 @@ const Encoder = struct {
     }
 
     pub fn mov_mem_imm32(self: *Self, base: Register, disp: i32, value: []const u8) !void {
-        std.log.debug("mov qword ptr [{s} + 0x{x}], {x}", .{ @tagName(base), disp, value });
+        log.debug("mov qword ptr [{s} + 0x{x}], {x}", .{ @tagName(base), disp, value });
         try self.emit_rex(.{ .rm = base });
         try self.buffer.writer().writeByte(MOV_REG_IMM);
 
@@ -347,7 +348,7 @@ const Encoder = struct {
     }
 
     pub fn inc_reg(self: *Self, reg: Register) !void {
-        std.log.debug("inc {s}", .{@tagName(reg)});
+        log.debug("inc {s}", .{@tagName(reg)});
         try self.emit_rex(.{ .rm = reg });
         try self.buffer.writer().writeByte(INC_REG);
 
@@ -356,7 +357,7 @@ const Encoder = struct {
     }
 
     pub fn cmp_reg_imm32(self: *Self, reg: Register, value: u32) !void {
-        std.log.debug("cmp {s}, {x}", .{ @tagName(reg), value });
+        log.debug("cmp {s}, {x}", .{ @tagName(reg), value });
         try self.emit_rex(.{ .rm = reg });
 
         // Special shorter encoding for comparing with RAX
@@ -373,21 +374,21 @@ const Encoder = struct {
     }
 
     pub fn cmp_reg_reg(self: *Self, reg1: Register, reg2: Register) !void {
-        std.log.debug("cmp {s}, {s}", .{ @tagName(reg1), @tagName(reg2) });
+        log.debug("cmp {s}, {s}", .{ @tagName(reg1), @tagName(reg2) });
         try self.emit_rex(.{ .reg = reg2, .rm = reg1 });
         try self.buffer.writer().writeByte(CMP_REG_REG);
         try self.buffer.writer().writeByte(modrm(reg2, reg1, .{ .register = {} }));
     }
 
     pub fn add_reg_reg(self: *Self, dest: Register, src: Register) !void {
-        std.log.debug("add {s}, {s}", .{ @tagName(dest), @tagName(src) });
+        log.debug("add {s}, {s}", .{ @tagName(dest), @tagName(src) });
         try self.emit_rex(.{ .reg = dest, .rm = src });
         try self.buffer.writer().writeByte(ADD_REG_REG);
         try self.buffer.writer().writeByte(modrm(src, dest, .{ .register = {} }));
     }
 
     pub fn imul_reg_reg(self: *Self, dest: Register, src: Register) !void {
-        std.log.debug("imul {s}, {s}", .{ @tagName(dest), @tagName(src) });
+        log.debug("imul {s}, {s}", .{ @tagName(dest), @tagName(src) });
         try self.emit_rex(.{ .reg = dest, .rm = src });
         try self.buffer.writer().writeInt(u16, IMUL_REG_REG, .big);
         try self.buffer.writer().writeByte(modrm(dest, src, .{ .register = {} }));
@@ -396,12 +397,12 @@ const Encoder = struct {
     pub fn jle(self: *Self, distance: usize) !void {
         assert(distance < 0xff);
         const offset: u8 = 0xfe - @as(u8, @truncate(distance));
-        std.log.debug("jl 0x{x}", .{self.buffer.items.len - distance});
+        log.debug("jl 0x{x}", .{self.buffer.items.len - distance});
         try self.buffer.writer().writeAll(&[_]u8{ JL_SHORT, offset });
     }
 
     pub fn push_reg(self: *Self, reg: Register) !void {
-        std.log.debug("push {s}", .{@tagName(reg)});
+        log.debug("push {s}", .{@tagName(reg)});
 
         if (reg.is_extended()) {
             try self.buffer.writer().writeByte(0x41);
@@ -531,8 +532,8 @@ fn generate_const(node: ir.Node, ctx: *Context) !void {
 
 inline fn value_to_4_bytes(dtype: ir.DataTypes, dest: *[4]u8, source: []const u8) !void {
     const bytes = switch (dtype) {
-        .Int => std.mem.toBytes(std.mem.nativeToLittle(i32, try fmt.parseInt(i32, source, 10))),
-        .Float => std.mem.toBytes(std.mem.nativeToLittle(f32, try fmt.parseFloat(f32, source))),
+        .Int => mem.toBytes(mem.nativeToLittle(i32, try fmt.parseInt(i32, source, 10))),
+        .Float => mem.toBytes(mem.nativeToLittle(f32, try fmt.parseFloat(f32, source))),
         else => unreachable,
     };
 
@@ -546,7 +547,7 @@ fn generate_loop(node: ir.Node, ctx: *Context) !void {
         try ctx.store.write(node.step, .{ .Immediate = value });
     }
 
-    std.log.debug("label_0x{x}:", .{ctx.encoder.buffer.items.len});
+    log.debug("label_0x{x}:", .{ctx.encoder.buffer.items.len});
     try ctx.labels.put(node.step, ctx.encoder.buffer.items.len);
 }
 
