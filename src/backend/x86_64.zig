@@ -7,14 +7,6 @@ const assert = std.debug.assert;
 
 const ir = @import("../compiler/ir.zig");
 
-const Context = struct {
-    block: *const ir.Block,
-    cursor: usize = 0,
-    store: *ValueStore,
-    labels: *std.AutoHashMap(ir.Step, usize),
-    encoder: *Encoder,
-};
-
 pub const Register = enum(u8) {
     // static
     Rax,
@@ -96,7 +88,7 @@ const CircularBuffer = struct {
     }
 };
 
-const ValueStore = struct {
+const Memory = struct {
     const Self = @This();
 
     map: std.AutoHashMap(ir.Step, Location),
@@ -487,10 +479,18 @@ const Encoder = struct {
     }
 };
 
+const Context = struct {
+    block: *const ir.Block,
+    cursor: usize = 0,
+    store: *Memory,
+    labels: *std.AutoHashMap(ir.Step, usize),
+    encoder: *Encoder,
+};
+
 pub fn generate_kernel(allocator: mem.Allocator, block: *const ir.Block) ![]const u8 {
     var labels = std.AutoHashMap(ir.Step, usize).init(allocator);
     var encoder = Encoder.init(allocator);
-    var store = try ValueStore.init(allocator, &encoder);
+    var store = try Memory.init(allocator, &encoder);
 
     var ctx = Context{
         .block = block,
