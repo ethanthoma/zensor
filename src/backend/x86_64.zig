@@ -124,24 +124,13 @@ const ValueStore = struct {
     };
 
     pub const SourceValue = union(enum) {
-        Immediate: u32,
+        Immediate: []const u8,
         Register: Register,
     };
 
-    pub fn assign_static(self: *Self, step_dest: ir.Step, source: SourceValue) !void {
-        self.offset += 8;
-        const loc = Location{ .Stack = -self.offset };
-        try self.map.put(step_dest, loc);
-
-        switch (source) {
-            .Immediate => |value| try self.encoder.push_imm32(value),
-            .Register => |reg| try self.encoder.push_reg(reg),
-        }
-    }
-
     pub fn read(self: *Self, step: ir.Step) !Register {
         if (self.consts.get(step)) |value| {
-            return try self.alloc_temp(step, mem.bytesToValue(u32, value), self.encoder);
+            return try self.alloc_temp(step, value, self.encoder);
         }
 
         if (self.map.get(step)) |loc| {
@@ -158,11 +147,37 @@ const ValueStore = struct {
         @panic("Failed to get register for step");
     }
 
+    fn alloc_temp(self: *Self, step: ir.Step, value: []const u8, encoder: *Encoder) !Register {
+        const reg = self.temp_queue.read();
+
+        if (self.temp_steps.get(reg)) |previous_step_using_this_reg| {
+            try self.write(previous_step_using_this_reg, .{ .Register = reg });
+            _ = self.temp_steps.remove(reg);
+            _ = self.map.remove(previous_step_using_this_reg);
+        }
+
+        const new_loc = Location{ .Temp = reg };
+        try encoder.mov_reg_imm32(reg, value);
+        try self.map.put(step, new_loc);
+        try self.temp_steps.put(reg, step);
+
+        return reg;
+    }
+
     pub fn write(self: *Self, step: ir.Step, source: SourceValue) !void {
         const loc = if (self.map.get(step)) |loc|
             loc
-        else
-            return self.assign_static(step, source);
+        else {
+            self.offset += 8;
+            try self.map.put(step, .{ .Stack = -self.offset });
+
+            switch (source) {
+                .Immediate => |value| try self.encoder.push_imm32(value),
+                .Register => |reg| try self.encoder.push_reg(reg),
+            }
+
+            return;
+        };
 
         switch (loc) {
             .Stack => |offset| switch (source) {
@@ -185,23 +200,6 @@ const ValueStore = struct {
             },
         }
     }
-
-    fn alloc_temp(self: *Self, step: ir.Step, value: u32, encoder: *Encoder) !Register {
-        const reg = self.temp_queue.read();
-
-        if (self.temp_steps.get(reg)) |previous_step_using_this_reg| {
-            try self.write(previous_step_using_this_reg, .{ .Register = reg });
-            _ = self.temp_steps.remove(reg);
-            _ = self.map.remove(previous_step_using_this_reg);
-        }
-
-        const new_loc = Location{ .Temp = reg };
-        try encoder.mov_reg_imm32(reg, value);
-        try self.map.put(step, new_loc);
-        try self.temp_steps.put(reg, step);
-
-        return reg;
-    }
 };
 
 const Encoder = struct {
@@ -214,12 +212,10 @@ const Encoder = struct {
     const REX_W = 0x48; // 64-bit operand size prefix
 
     // Control Flow
-    const JLE_SHORT = 0x7e;
     const JL_SHORT = 0x7c;
     const RET = 0xc3;
 
     // Stack
-    const POP_RBP = 0x5d;
     const PUSH_IMM32 = 0x68;
     const LEAVE = 0xc9;
 
@@ -251,8 +247,8 @@ const Encoder = struct {
         try self.buffer.writer().writeByte(RET);
     }
 
-    pub fn mov_reg_imm32(self: *Self, dest: Register, value: u32) !void {
-        if (value == 0) {
+    pub fn mov_reg_imm32(self: *Self, dest: Register, value: []const u8) !void {
+        if (mem.bytesToValue(u32, value[0..4]) == 0) {
             std.log.debug("xor {s}, {s}", .{ @tagName(dest), @tagName(dest) });
             try self.emit_rex(.{ .reg = dest, .rm = dest });
             try self.buffer.writer().writeByte(XOR_REG_REG);
@@ -267,7 +263,7 @@ const Encoder = struct {
         // ModR/M: Mod=11 (reg), R/M=dest, Reg=0 (opcode extension)
         const modrm_byte = (@as(u8, 0b11) << 6) | (0b000 << 3) | dest.reg_encoding();
         try self.buffer.writer().writeByte(modrm_byte);
-        try self.buffer.writer().writeInt(u32, value, std.builtin.Endian.little);
+        try self.buffer.writer().writeAll(value[0..4]);
     }
 
     pub fn mov_reg_reg(self: *Self, dest: Register, src: Register) !void {
@@ -278,10 +274,10 @@ const Encoder = struct {
         try self.buffer.writer().writeByte(modrm(src, dest, .{ .register = {} }));
     }
 
-    pub fn push_imm32(self: *Self, value: u32) !void {
+    pub fn push_imm32(self: *Self, value: []const u8) !void {
         std.log.debug("push {x}", .{value});
         try self.buffer.writer().writeByte(PUSH_IMM32);
-        try self.buffer.writer().writeInt(u32, value, .little);
+        try self.buffer.writer().writeAll(value[0..4]);
     }
 
     pub fn mov_reg_from_mem(self: *Self, dest: Register, base: Register, disp: i32) !void {
@@ -343,7 +339,7 @@ const Encoder = struct {
         try self.buffer.writer().writeByte(sib_byte);
     }
 
-    pub fn mov_mem_imm32(self: *Self, base: Register, disp: i32, value: u32) !void {
+    pub fn mov_mem_imm32(self: *Self, base: Register, disp: i32, value: []const u8) !void {
         std.log.debug("mov qword ptr [{s} + 0x{x}], {x}", .{ @tagName(base), disp, value });
         try self.emit_rex(.{ .rm = base });
         try self.buffer.writer().writeByte(MOV_REG_IMM);
@@ -355,7 +351,7 @@ const Encoder = struct {
             try self.buffer.writer().writeByte(0x24);
         }
         try self.buffer.writer().writeInt(i32, disp, .little);
-        try self.buffer.writer().writeInt(u32, value, .little);
+        try self.buffer.writer().writeAll(value[0..4]);
     }
 
     pub fn inc_reg(self: *Self, reg: Register) !void {
@@ -535,35 +531,32 @@ fn generate_node(ctx: *Context) !void {
 
 // TODO: I made everything an int but that isnt correct. Need to change IR to handle bytes directly
 fn generate_define_acc(node: ir.Node, ctx: *Context) !void {
-    const value = try fmt.parseInt(u32, node.arg.DEFINE_ACC, 10);
-
-    try ctx.store.assign_static(node.step, .{ .Immediate = value });
-}
-
-inline fn value_to_4_bytes(dtype: ir.DataTypes, dest: *[]u8, source: []const u8) !void {
-    const bytes = switch (dtype) {
-        .Int => mem.toBytes(try fmt.parseInt(i32, source, 10)),
-        .Float => mem.toBytes(try fmt.parseFloat(f32, source)),
-        else => unreachable,
-    };
-
-    @memcpy(dest.*, bytes[0..4]);
+    var value = [_]u8{0} ** 4;
+    try value_to_4_bytes(node.dtype.?, &value, node.arg.DEFINE_ACC);
+    try ctx.store.write(node.step, .{ .Immediate = &value });
 }
 
 fn generate_const(node: ir.Node, ctx: *Context) !void {
-    var value = try ctx.store.allocator.alloc(u8, 4);
-
+    var value = [_]u8{0} ** 4;
     try value_to_4_bytes(node.dtype.?, &value, node.arg.CONST);
+    try ctx.store.consts.put(node.step, try ctx.store.allocator.dupe(u8, &value));
+}
 
-    try ctx.store.consts.put(node.step, value);
+inline fn value_to_4_bytes(dtype: ir.DataTypes, dest: *[4]u8, source: []const u8) !void {
+    const bytes = switch (dtype) {
+        .Int => std.mem.toBytes(std.mem.nativeToLittle(i32, try fmt.parseInt(i32, source, 10))),
+        .Float => std.mem.toBytes(std.mem.nativeToLittle(f32, try fmt.parseFloat(f32, source))),
+        else => unreachable,
+    };
+
+    @memcpy(dest, bytes[0..4]);
 }
 
 fn generate_loop(node: ir.Node, ctx: *Context) !void {
     const step_start = node.inputs.?[0];
 
-    if (ctx.store.consts.get(step_start)) |bytes| {
-        const value = mem.bytesToValue(u32, bytes);
-        try ctx.store.assign_static(node.step, .{ .Immediate = value });
+    if (ctx.store.consts.get(step_start)) |value| {
+        try ctx.store.write(node.step, .{ .Immediate = value });
     }
 
     std.log.debug("label_0x{x}:", .{ctx.encoder.buffer.items.len});
