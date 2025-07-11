@@ -103,22 +103,28 @@ pub const Numpy = struct {
             }
         }
 
-        const datatype = dtypes.FromNumpy(dtype) orelse return error.Invalid;
+        const numpy_dtype = dtypes.FromNumpy(dtype) orelse return error.Invalid;
 
         var size: u32 = 1;
         for (shape) |dim| {
             size *= dim;
         }
 
-        const data: []u8 = try allocator.alloc(u8, size * datatype.bits() / 8);
+        const data: []u8 = try allocator.alloc(u8, size * numpy_dtype.dtype.bits() / 8);
 
         try reader.readNoEof(data);
+
+        if (numpy_dtype.endian != @import("builtin").target.cpu.arch.endian()) {
+            for (data, 0..) |elem, i| {
+                data[i] = @byteSwap(elem);
+            }
+        }
 
         return .{
             .allocator = allocator,
             .ptr = data,
             .len = size,
-            .dtype = datatype,
+            .dtype = numpy_dtype.dtype,
             .shape = shape,
         };
     }

@@ -519,25 +519,11 @@ pub fn generate_kernel(allocator: mem.Allocator, block: *const ir.Block) ![]cons
 }
 
 fn generate_define_acc(node: ir.Node, ctx: *Context) !void {
-    var value = [_]u8{0} ** 4;
-    try value_to_4_bytes(node.dtype.?, &value, node.arg.DEFINE_ACC);
-    try ctx.store.write(node.step, .{ .Immediate = &value });
+    try ctx.store.write(node.step, .{ .Immediate = node.arg.DEFINE_ACC });
 }
 
 fn generate_const(node: ir.Node, ctx: *Context) !void {
-    var value = [_]u8{0} ** 4;
-    try value_to_4_bytes(node.dtype.?, &value, node.arg.CONST);
-    try ctx.store.consts.put(node.step, try ctx.store.allocator.dupe(u8, &value));
-}
-
-inline fn value_to_4_bytes(dtype: ir.DataTypes, dest: *[4]u8, source: []const u8) !void {
-    const bytes = switch (dtype) {
-        .Int => mem.toBytes(mem.nativeToLittle(i32, try fmt.parseInt(i32, source, 10))),
-        .Float => mem.toBytes(mem.nativeToLittle(f32, try fmt.parseFloat(f32, source))),
-        else => unreachable,
-    };
-
-    @memcpy(dest, bytes[0..4]);
+    try ctx.store.consts.put(node.step, node.arg.CONST);
 }
 
 fn generate_loop(node: ir.Node, ctx: *Context) !void {

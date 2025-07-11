@@ -26,9 +26,11 @@ pub fn Tensor(comptime datatype: dtypes.DType, comptime shape: anytype) type {
         }
 
         fn full_node(allocator: std.mem.Allocator, comptime value: anytype) !ast.Node {
+            const v = try allocator.dupe(u8, &std.mem.toBytes(@as(dtype.ToBuiltin(), @intCast(value))));
+
             return ast.Node.init(
                 .Const,
-                .{ .value = try std.fmt.allocPrint(allocator, "{}", .{value}) },
+                .{ .value = v },
                 {},
                 anyview,
                 dtype,
@@ -57,6 +59,10 @@ pub fn Tensor(comptime datatype: dtypes.DType, comptime shape: anytype) type {
             const buffer = try allocator.create(RuntimeBuffer);
             errdefer allocator.destroy(buffer);
             buffer.* = try RuntimeBuffer.Numpy.load(allocator, filename);
+
+            if (!std.meta.eql(buffer.dtype, dtype)) {
+                return error.MismatchedDataType;
+            }
 
             const node = try load_node(buffer);
             const index = try compiler.node_manager.add(node);

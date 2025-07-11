@@ -57,28 +57,37 @@ pub const DType = union(enum) {
     }
 };
 
-pub fn FromNumpy(dtype: []const u8) ?DType {
-    if (std.mem.eql(u8, dtype, "<f4")) {
-        return .Float32;
-    }
+pub const NumpyDType = struct {
+    dtype: DType,
+    endian: std.builtin.Endian,
+};
 
-    if (std.mem.eql(u8, dtype, "<f8")) {
-        return .Float64;
-    }
+pub fn FromNumpy(dtype: []const u8) ?NumpyDType {
+    if (dtype.len < 2) return null;
+    const endian_char = dtype[0];
+    const type_str = dtype[1..];
 
-    if (std.mem.eql(u8, dtype, "<i4")) {
-        return .Int32;
-    }
+    const endian = switch (endian_char) {
+        '<' => .little,
+        '>' => .big,
+        '=' => @import("builtin").target.cpu.arch.endian(),
+        else => return null,
+    };
 
-    if (std.mem.eql(u8, dtype, "<i8")) {
-        return .Int64;
-    }
+    const dtype_val: DType = if (std.mem.eql(u8, type_str, "f4"))
+        .Float32
+    else if (std.mem.eql(u8, type_str, "f8"))
+        .Float64
+    else if (std.mem.eql(u8, type_str, "i4"))
+        .Int32
+    else if (std.mem.eql(u8, type_str, "i8"))
+        .Int64
+    else if (std.mem.eql(u8, type_str, "b2"))
+        .BFloat16
+    else
+        return null;
 
-    if (std.mem.eql(u8, dtype, "<b2")) {
-        return .BFloat16;
-    }
-
-    return null;
+    return NumpyDType{ .dtype = dtype_val, .endian = endian };
 }
 
 pub const BFloat16 = packed struct {

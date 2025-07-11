@@ -225,7 +225,7 @@ fn render_loop(node: *const ast.Node, block: *ir.Block, context: *Context) !ir.S
             .CONST,
             .Int,
             null,
-            try std.fmt.allocPrint(block.allocator, "{}", .{range.start}),
+            try block.allocator.dupe(u8, &std.mem.toBytes(range.start)),
         );
     }
 
@@ -233,14 +233,14 @@ fn render_loop(node: *const ast.Node, block: *ir.Block, context: *Context) !ir.S
         .CONST,
         .Int,
         null,
-        try std.fmt.allocPrint(block.allocator, "{}", .{range.start}),
+        try block.allocator.dupe(u8, &std.mem.toBytes(range.start)),
     );
 
     const end_of_range = try block.append(
         .CONST,
         .Int,
         null,
-        try std.fmt.allocPrint(block.allocator, "{}", .{range.end}),
+        try block.allocator.dupe(u8, &std.mem.toBytes(range.end)),
     );
 
     const loop_index = try block.append(
@@ -333,7 +333,7 @@ fn handle_reduce_op(
         @compileError("handle_reduce_op only handles reduce ops");
     }
 
-    const default_value = switch (op) {
+    const default_value: u32 = switch (op) {
         .Sum => 0,
         else => unreachable,
     };
@@ -345,7 +345,7 @@ fn handle_reduce_op(
             .DEFINE_ACC,
             ir_dtype_from_dtype(node.dtype),
             try block.allocator.dupe(ir.Step, &[_]ir.Step{loop_index}),
-            try std.fmt.allocPrint(block.allocator, "{}", .{default_value}),
+            try block.allocator.dupe(u8, &std.mem.toBytes(default_value)),
         );
 
         break :blk try render_above_scope(block, acc, context);
